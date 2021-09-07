@@ -416,7 +416,7 @@ public class PrestoSparkQueryExecutionFactory
                         sql,
                         session,
                         URI.create("http://fake.invalid/query/" + session.getQueryId()),
-                        sparkQueueName.map(ResourceGroupId::new).get(),
+                        new ResourceGroupId("test"),
                         queryType,
                         StatementUtils.isTransactionControlStatement(preparedQuery.getStatement()),
                         transactionManager,

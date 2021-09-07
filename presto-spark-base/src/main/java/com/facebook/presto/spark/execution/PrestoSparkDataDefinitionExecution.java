@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.spark.execution;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.presto.Session;
 import com.facebook.presto.execution.DataDefinitionTask;
 import com.facebook.presto.execution.QueryStateMachine;
@@ -34,12 +35,15 @@ import java.util.Optional;
 
 import static com.facebook.airlift.concurrent.MoreFutures.getFutureValue;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.util.Objects.requireNonNull;
 
 public class PrestoSparkDataDefinitionExecution<T extends Statement>
         implements IPrestoSparkQueryExecution
 {
+    private static final Logger log = Logger.get(PrestoSparkDataDefinitionExecution.class);
+
     private final DataDefinitionTask<T> task;
     private final QueryStateMachine queryStateMachine;
     private final T statement;
@@ -66,7 +70,8 @@ public class PrestoSparkDataDefinitionExecution<T extends Statement>
     @Override
     public List<List<Object>> execute()
     {
-        System.out.println("Executing new method Drop Task  1235");
+        log.info("Executing DDL statemt %s", statement.toString());
+
         ListenableFuture<?> future = task.execute(statement, transactionManager, metadata, accessControl, queryStateMachine, Collections.emptyList());
 
         Futures.addCallback(future, new FutureCallback<Object>()
@@ -74,18 +79,25 @@ public class PrestoSparkDataDefinitionExecution<T extends Statement>
             @Override
             public void onSuccess(@Nullable Object result)
             {
-                System.out.println("Executing new async Commit 12356 ");
                 getFutureValue(transactionManager.asyncCommit(getTransactionInfo(queryStateMachine.getSession(), transactionManager).getTransactionId()));
             }
 
             @Override
-            public void onFailure(Throwable throwable)
+            public void onFailure(Throwable e)
             {
-                throwable.printStackTrace();
+                log.error("Error occured whike executing DDL", throwable);
+                fail(e);
+                throwIfInstanceOf(e, Error.class);
             }
         }, directExecutor());
 
         return Collections.emptyList();
+    }
+
+    private void fail(Throwable cause)
+    {
+        queryStateMachine.transitionToFailed(cause);
+        queryStateMachinee.updateQueryInfo(Optional.empty());
     }
 
     private static TransactionInfo getTransactionInfo(Session session, TransactionManager transactionManager)
@@ -96,4 +108,5 @@ public class PrestoSparkDataDefinitionExecution<T extends Statement>
         checkState(transaction.get().isAutoCommitContext(), "transaction doesn't have auto commit context enabled");
         return transaction.get();
     }
+
 }

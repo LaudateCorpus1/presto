@@ -50,6 +50,29 @@ public class TestPrestoSparkQueryRunner
     }
 
     @Test
+    public void testDDLStatements()
+    {
+        assertQuerySucceeds("CREATE TABLE foo AS SELECT * FROM nation");
+        
+        assertQuerySucceeds("SET SESSION optimize_hash_generation=false");
+        assertQuerySucceeds("RESET SESSION optimize_hash_generation");
+        assertQuerySucceeds("COMMIT");
+        assertQuerySucceeds("ROLLBACK");
+        assertQuerySucceeds("GRANT INSERT ON foo TO bar");
+        assertQuerySucceeds("REVOKE INSERT ON foo FROM bar");
+        assertQuerySucceeds("CREATE SCHEMA foo1");
+        assertQuerySucceeds("ALTER SCHEMA foo1 RENAME TO bar");
+        assertQuerySucceeds("DROP SCHEMA bar");
+        assertQuerySucceeds("DROP TABLE foo");
+        assertQuerySucceeds("CREATE TABLE foo2 (x bigint)");
+        assertQuerySucceeds("ALTER TABLE foo2 ADD COLUMN y bigint");
+        assertQuerySucceeds("ALTER TABLE foo2 RENAME TO bar2");
+        assertQuerySucceeds("DROP TABLE bar2");
+        assertQuerySucceeds("CREATE VIEW foo AS SELECT * FROM nation");
+        assertQuerySucceeds("DROP VIEW foo");
+     }
+
+    @Test
     public void testTableWrite()
     {
         // some basic tests

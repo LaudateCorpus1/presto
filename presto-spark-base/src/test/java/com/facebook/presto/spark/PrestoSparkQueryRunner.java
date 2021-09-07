@@ -38,6 +38,7 @@ import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.SessionPropertyManager;
 import com.facebook.presto.server.PluginManager;
 import com.facebook.presto.spark.PrestoSparkQueryExecutionFactory.PrestoSparkQueryExecution;
+import com.facebook.presto.spark.classloader_interface.IPrestoSparkQueryExecution;
 import com.facebook.presto.spark.classloader_interface.IPrestoSparkQueryExecutionFactory;
 import com.facebook.presto.spark.classloader_interface.IPrestoSparkTaskExecutorFactory;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkConfInitializer;
@@ -293,7 +294,10 @@ public class PrestoSparkQueryRunner
         pluginManager.installPlugin(new HivePlugin("hive", Optional.of(metastore)));
 
         connectorManager.createConnection("hive", "hive", ImmutableMap.of(
-                "hive.experimental-optimized-partition-update-serialization-enabled", "true"));
+                "hive.experimental-optimized-partition-update-serialization-enabled", "true",
+                "hive.allow-drop-table", "true", "hive.allow-rename-table", "true",
+                "hive.allow-rename-column", "true",
+                "hive.allow-add-column", "true"));
 
         metadata.registerBuiltInFunctions(AbstractTestQueries.CUSTOM_FUNCTIONS);
 
@@ -401,7 +405,7 @@ public class PrestoSparkQueryRunner
     public MaterializedResult execute(Session session, String sql)
     {
         IPrestoSparkQueryExecutionFactory executionFactory = prestoSparkService.getQueryExecutionFactory();
-        PrestoSparkQueryExecution execution = (PrestoSparkQueryExecution) executionFactory.create(
+        IPrestoSparkQueryExecution execution = executionFactory.create(
                 sparkContext,
                 createSessionInfo(session),
                 Optional.of(sql),
@@ -417,17 +421,30 @@ public class PrestoSparkQueryRunner
                 .map(result -> new MaterializedRow(DEFAULT_PRECISION, result))
                 .collect(toImmutableList());
 
-        if (!execution.getUpdateType().isPresent()) {
-            return new MaterializedResult(rows, execution.getOutputTypes());
+        if (execution instanceof PrestoSparkQueryExecution) {
+            PrestoSparkQueryExecution p = (PrestoSparkQueryExecution) execution;
+            if (!p.getUpdateType().isPresent()) {
+                return new MaterializedResult(rows, p.getOutputTypes());
+            }
+            else {
+                return new MaterializedResult(
+                    rows,
+                    p.getOutputTypes(),
+                    ImmutableMap.of(),
+                    ImmutableSet.of(),
+                    p.getUpdateType(),
+                    OptionalLong.of((Long) getOnlyElement(getOnlyElement(rows).getFields())),
+                    ImmutableList.of());
+            }
         }
         else {
             return new MaterializedResult(
                     rows,
-                    execution.getOutputTypes(),
+                    ImmutableList.of(),
                     ImmutableMap.of(),
                     ImmutableSet.of(),
-                    execution.getUpdateType(),
-                    OptionalLong.of((Long) getOnlyElement(getOnlyElement(rows).getFields())),
+                    Optional.empty(),
+                    OptionalLong.empty(),
                     ImmutableList.of());
         }
     }
