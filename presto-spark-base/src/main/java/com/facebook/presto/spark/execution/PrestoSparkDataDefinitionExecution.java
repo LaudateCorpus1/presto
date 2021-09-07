@@ -85,7 +85,6 @@ public class PrestoSparkDataDefinitionExecution<T extends Statement>
             @Override
             public void onFailure(Throwable e)
             {
-                log.error("Error occured whike executing DDL", throwable);
                 fail(e);
                 throwIfInstanceOf(e, Error.class);
             }
@@ -97,7 +96,7 @@ public class PrestoSparkDataDefinitionExecution<T extends Statement>
     private void fail(Throwable cause)
     {
         queryStateMachine.transitionToFailed(cause);
-        queryStateMachinee.updateQueryInfo(Optional.empty());
+        queryStateMachine.updateQueryInfo(Optional.empty());
     }
 
     private static TransactionInfo getTransactionInfo(Session session, TransactionManager transactionManager)
@@ -108,5 +107,4 @@ public class PrestoSparkDataDefinitionExecution<T extends Statement>
         checkState(transaction.get().isAutoCommitContext(), "transaction doesn't have auto commit context enabled");
         return transaction.get();
     }
-
 }

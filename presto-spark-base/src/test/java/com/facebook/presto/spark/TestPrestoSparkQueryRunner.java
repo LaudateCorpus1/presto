@@ -53,7 +53,6 @@ public class TestPrestoSparkQueryRunner
     public void testDDLStatements()
     {
         assertQuerySucceeds("CREATE TABLE foo AS SELECT * FROM nation");
-        
         assertQuerySucceeds("SET SESSION optimize_hash_generation=false");
         assertQuerySucceeds("RESET SESSION optimize_hash_generation");
         assertQuerySucceeds("COMMIT");
@@ -70,7 +69,7 @@ public class TestPrestoSparkQueryRunner
         assertQuerySucceeds("DROP TABLE bar2");
         assertQuerySucceeds("CREATE VIEW foo AS SELECT * FROM nation");
         assertQuerySucceeds("DROP VIEW foo");
-     }
+    }
 
     @Test
     public void testTableWrite()
