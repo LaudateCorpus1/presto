@@ -121,6 +121,7 @@ import com.facebook.presto.sql.planner.optimizations.CheckSubqueryNodesAreRewrit
 import com.facebook.presto.sql.planner.optimizations.HashGenerationOptimizer;
 import com.facebook.presto.sql.planner.optimizations.ImplementIntersectAndExceptAsUnion;
 import com.facebook.presto.sql.planner.optimizations.IndexJoinOptimizer;
+import com.facebook.presto.sql.planner.optimizations.KeyBasedSampler;
 import com.facebook.presto.sql.planner.optimizations.LimitPushDown;
 import com.facebook.presto.sql.planner.optimizations.MetadataDeleteOptimizer;
 import com.facebook.presto.sql.planner.optimizations.MetadataQueryOptimizer;
@@ -406,6 +407,7 @@ public class PlanOptimizers
                         estimatedExchangesCostCalculator,
                         ImmutableSet.of(new RewriteAggregationIfToFilter(metadata.getFunctionAndTypeManager()))),
                 predicatePushDown,
+                new KeyBasedSampler(metadata, sqlParser),
                 new IterativeOptimizer(
                         ruleStats,
                         statsCalculator,
@@ -483,9 +485,6 @@ public class PlanOptimizers
                         new RewriteFilterWithExternalFunctionToProject(metadata.getFunctionAndTypeManager()),
                         new PlanRemotePojections(metadata.getFunctionAndTypeManager()))));
 
-        // This rule must be applied before the connector optimizer rules which might fully push down filters to the connector.
-        builder.add(new MetadataQueryOptimizer(metadata));
-
         // Pass a supplier so that we pickup connector optimizers that are installed later
         builder.add(
                 new ApplyConnectorOptimization(() -> planOptimizerManager.getOptimizers(LOGICAL)),
@@ -501,6 +500,8 @@ public class PlanOptimizers
 
         builder.add(predicatePushDown); // Run predicate push down one more time in case we can leverage new information from layouts' effective predicate
         builder.add(simplifyRowExpressionOptimizer); // Should be always run after PredicatePushDown
+
+        builder.add(new MetadataQueryOptimizer(metadata));
 
         // This can pull up Filter and Project nodes from between Joins, so we need to push them down again
         builder.add(

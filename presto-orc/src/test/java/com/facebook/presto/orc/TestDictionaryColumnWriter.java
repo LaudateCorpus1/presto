@@ -18,10 +18,13 @@ import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.BlockBuilder;
 import com.facebook.presto.common.type.ArrayType;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.orc.DictionaryCompressionOptimizer.DictionaryColumnManager;
 import com.facebook.presto.orc.metadata.ColumnEncoding;
 import com.facebook.presto.orc.metadata.StripeFooter;
 import com.facebook.presto.orc.writer.DictionaryColumnWriter;
+import com.facebook.presto.orc.writer.SliceDictionaryColumnWriter;
 import com.google.common.collect.ImmutableList;
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import org.testng.annotations.Test;
 
@@ -47,11 +50,13 @@ import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT_V2;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DWRF_DIRECT;
+import static com.facebook.presto.orc.metadata.CompressionKind.SNAPPY;
 import static com.facebook.presto.orc.metadata.CompressionKind.ZSTD;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.cycle;
 import static com.google.common.collect.Iterables.limit;
 import static com.google.common.collect.Lists.newArrayList;
+import static io.airlift.slice.SizeOf.SIZE_OF_INT;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.lang.Math.toIntExact;
@@ -229,6 +234,42 @@ public class TestDictionaryColumnWriter
     }
 
     @Test
+    public void testStringPreserveDirectEncoding()
+            throws IOException
+    {
+        ImmutableList.Builder<String> builder = ImmutableList.builder();
+        for (long i = 0; i < STRIPE_MAX_ROWS; i++) {
+            builder.add(Long.toString(Integer.MAX_VALUE + i));
+        }
+        int repeatInterval = 1500;
+        for (long i = 0; i < 100_000; i++) {
+            builder.add(Long.toString(Integer.MAX_VALUE + i % repeatInterval));
+        }
+        int preserveDirectEncodingStripeCount = 2;
+        OrcWriterOptions.Builder orcWriterOptionsBuilder = OrcWriterOptions.builder()
+                .withStripeMaxRowCount(STRIPE_MAX_ROWS)
+                .withIntegerDictionaryEncodingEnabled(true)
+                .withPreserveDirectEncodingStripeCount(preserveDirectEncodingStripeCount);
+
+        List<String> values = builder.build();
+        for (StringDictionaryInput input : StringDictionaryInput.values()) {
+            DirectConversionTester tester = new DirectConversionTester();
+            OrcWriterOptions orcWriterOptions = orcWriterOptionsBuilder
+                    .withStringDictionarySortingEnabled(input.isSortStringDictionaryKeys())
+                    .build();
+
+            List<StripeFooter> stripeFooters = testDictionary(VARCHAR, input.getEncoding(), orcWriterOptions, tester, values);
+            assertEquals(getStripeSize(values.size()), stripeFooters.size());
+            for (int i = 0; i <= preserveDirectEncodingStripeCount; i++) {
+                verifyDirectEncoding(stripeFooters, input.getEncoding(), i);
+            }
+            for (int i = preserveDirectEncodingStripeCount + 1; i < stripeFooters.size(); i++) {
+                verifyDictionaryEncoding(stripeFooters, input.getEncoding(), i, repeatInterval);
+            }
+        }
+    }
+
+    @Test
     public void testIntegerNoRows()
             throws IOException
     {
@@ -296,6 +337,41 @@ public class TestDictionaryColumnWriter
     }
 
     @Test
+    public void testDictionaryRetainedSizeWithDifferentSettings()
+    {
+        DictionaryColumnWriter ignoredRowGroupWriter = getStringDictionaryColumnWriter(true);
+        DictionaryColumnWriter withRowGroupWriter = getStringDictionaryColumnWriter(false);
+
+        int numEntries = 10_000;
+        int numBlocks = 10;
+        BlockBuilder blockBuilder = VARCHAR.createBlockBuilder(null, numEntries);
+        Slice slice = utf8Slice("SomeString");
+        for (int i = 0; i < numEntries; i++) {
+            VARCHAR.writeSlice(blockBuilder, slice);
+        }
+
+        Block block = blockBuilder.build();
+        for (int i = 0; i < numBlocks; i++) {
+            writeBlock(ignoredRowGroupWriter, block);
+            writeBlock(withRowGroupWriter, block);
+        }
+
+        long ignoredRowGroupBytes = ignoredRowGroupWriter.getRowGroupRetainedSizeInBytes();
+        long withRowGroupBytes = withRowGroupWriter.getRowGroupRetainedSizeInBytes();
+        long expectedDictionaryIndexSize = (numBlocks * numEntries * SIZE_OF_INT);
+
+        String message = String.format("Ignored bytes %s With bytes %s", ignoredRowGroupBytes, withRowGroupBytes);
+        assertTrue(ignoredRowGroupBytes + expectedDictionaryIndexSize <= withRowGroupBytes, message);
+    }
+
+    private void writeBlock(DictionaryColumnWriter writer, Block block)
+    {
+        writer.beginRowGroup();
+        writer.writeBlock(block);
+        writer.finishRowGroup();
+    }
+
+    @Test
     public void testLongRandomValues()
             throws IOException
     {
@@ -316,6 +392,22 @@ public class TestDictionaryColumnWriter
                 .withRowGroupMaxRowCount(14_998)
                 .build();
         testDictionary(BIGINT, DWRF, writerOptions, directConversionTester, values);
+    }
+
+    private static DictionaryColumnWriter getStringDictionaryColumnWriter(boolean ignoreRowGroupSizes)
+    {
+        OrcEncoding orcEncoding = DWRF;
+        ColumnWriterOptions columnWriterOptions = ColumnWriterOptions.builder()
+                .setCompressionKind(SNAPPY)
+                .setIgnoreDictionaryRowGroupSizes(ignoreRowGroupSizes)
+                .build();
+        return new SliceDictionaryColumnWriter(
+                COLUMN_ID,
+                VARCHAR,
+                columnWriterOptions,
+                Optional.empty(),
+                orcEncoding,
+                orcEncoding.createMetadataWriter());
     }
 
     private List<Long> generateRandomLongs(int maxSize)
@@ -433,6 +525,37 @@ public class TestDictionaryColumnWriter
     }
 
     @Test
+    public void testLongPreserveDirectEncoding()
+            throws IOException
+    {
+        ImmutableList.Builder<Long> builder = ImmutableList.builder();
+        for (long i = 0; i < STRIPE_MAX_ROWS; i++) {
+            builder.add(i);
+        }
+        int repeatInterval = 1500;
+        for (long i = 0; i < 100_000; i++) {
+            builder.add(i % repeatInterval);
+        }
+        DirectConversionTester tester = new DirectConversionTester();
+        int preserveDirectEncodingStripeCount = 2;
+        OrcWriterOptions orcWriterOptions = OrcWriterOptions.builder()
+                .withStripeMaxRowCount(STRIPE_MAX_ROWS)
+                .withIntegerDictionaryEncodingEnabled(true)
+                .withPreserveDirectEncodingStripeCount(preserveDirectEncodingStripeCount)
+                .build();
+
+        List<Long> values = builder.build();
+        List<StripeFooter> stripeFooters = testDictionary(BIGINT, DWRF, orcWriterOptions, tester, values);
+        assertEquals(getStripeSize(values.size()), stripeFooters.size());
+        for (int i = 0; i <= preserveDirectEncodingStripeCount; i++) {
+            verifyDwrfDirectEncoding(stripeFooters, i);
+        }
+        for (int i = preserveDirectEncodingStripeCount + 1; i < stripeFooters.size(); i++) {
+            verifyDictionaryEncoding(stripeFooters, DWRF, i, repeatInterval);
+        }
+    }
+
+    @Test
     public void verifyIntegerInList()
             throws IOException
     {
@@ -516,18 +639,18 @@ public class TestDictionaryColumnWriter
 
     private void verifyDwrfDirectEncoding(List<StripeFooter> stripeFooters, int stripeId)
     {
-        assertEquals(getColumnEncoding(stripeFooters, stripeId).getColumnEncodingKind(), DWRF_DIRECT);
+        assertEquals(getColumnEncoding(stripeFooters, stripeId).getColumnEncodingKind(), DWRF_DIRECT, "StripeId " + stripeId);
     }
 
     private void verifyDirectEncoding(List<StripeFooter> stripeFooters, OrcEncoding encoding, int stripeId)
     {
         ColumnEncoding columnEncoding = getColumnEncoding(stripeFooters, stripeId);
         if (encoding.equals(DWRF)) {
-            assertEquals(columnEncoding.getColumnEncodingKind(), DIRECT);
+            assertEquals(columnEncoding.getColumnEncodingKind(), DIRECT, "Encoding " + encoding + " StripeId " + stripeId);
         }
         else {
             assertEquals(encoding, ORC);
-            assertEquals(columnEncoding.getColumnEncodingKind(), DIRECT_V2);
+            assertEquals(columnEncoding.getColumnEncodingKind(), DIRECT_V2, "Encoding " + encoding + " StripeId " + stripeId);
         }
     }
 
@@ -535,13 +658,13 @@ public class TestDictionaryColumnWriter
     {
         ColumnEncoding columnEncoding = getColumnEncoding(stripeFooters, stripeId);
         if (encoding.equals(DWRF)) {
-            assertEquals(columnEncoding.getColumnEncodingKind(), DICTIONARY);
+            assertEquals(columnEncoding.getColumnEncodingKind(), DICTIONARY, "Encoding " + encoding + " StripeId " + stripeId);
         }
         else {
             assertEquals(encoding, ORC);
-            assertEquals(columnEncoding.getColumnEncodingKind(), DICTIONARY_V2);
+            assertEquals(columnEncoding.getColumnEncodingKind(), DICTIONARY_V2, "Encoding " + encoding + " StripeId " + stripeId);
         }
-        assertEquals(columnEncoding.getDictionarySize(), dictionarySize);
+        assertEquals(columnEncoding.getDictionarySize(), dictionarySize, "Encoding " + encoding + " StripeId " + stripeId);
     }
 
     private void verifyDictionaryEncoding(int stripeCount, OrcEncoding encoding, List<StripeFooter> stripeFooters, List<Integer> dictionarySizes)
@@ -770,8 +893,13 @@ public class TestDictionaryColumnWriter
                 else {
                     // Successful conversion to direct, changes the state of the dictionary compression
                     // optimizer and it should go only via dictionary compression optimizer.
-                    writer.getDictionaryCompressionOptimizer().convertLowCompressionStreams(bufferedBytes);
+                    List<DictionaryColumnManager> directConversionCandidates = writer.getDictionaryCompressionOptimizer().getDirectConversionCandidates();
+                    boolean contains = directConversionCandidates.stream().anyMatch(x -> x.getDictionaryColumn() == columnWriter);
+                    assertTrue(contains);
+                    writer.getDictionaryCompressionOptimizer().convertLowCompressionStreams(true, bufferedBytes);
                     assertTrue(columnWriter.isDirectEncoded(), "BatchId " + batchId + " bytes " + bufferedBytes);
+                    contains = directConversionCandidates.stream().anyMatch(x -> x.getDictionaryColumn() == columnWriter);
+                    assertFalse(contains);
                 }
                 index++;
             }

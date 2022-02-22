@@ -34,6 +34,7 @@ import com.facebook.presto.sql.analyzer.FeaturesConfig.PartialAggregationStrateg
 import com.facebook.presto.sql.analyzer.FeaturesConfig.PartialMergePushdownStrategy;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.PartitioningPrecisionStrategy;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.SingleStreamSpillerChoice;
+import com.facebook.presto.tracing.TracingConfig;
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
@@ -118,12 +119,14 @@ public final class SystemSessionProperties
     public static final String INITIAL_SPLITS_PER_NODE = "initial_splits_per_node";
     public static final String SPLIT_CONCURRENCY_ADJUSTMENT_INTERVAL = "split_concurrency_adjustment_interval";
     public static final String OPTIMIZE_METADATA_QUERIES = "optimize_metadata_queries";
+    public static final String OPTIMIZE_METADATA_QUERIES_IGNORE_STATS = "optimize_metadata_queries_ignore_stats";
     public static final String FAST_INEQUALITY_JOINS = "fast_inequality_joins";
     public static final String QUERY_PRIORITY = "query_priority";
     public static final String SPILL_ENABLED = "spill_enabled";
     public static final String JOIN_SPILL_ENABLED = "join_spill_enabled";
     public static final String AGGREGATION_SPILL_ENABLED = "aggregation_spill_enabled";
     public static final String DISTINCT_AGGREGATION_SPILL_ENABLED = "distinct_aggregation_spill_enabled";
+    public static final String DEDUP_BASED_DISTINCT_AGGREGATION_SPILL_ENABLED = "dedup_based_distinct_aggregation_spill_enabled";
     public static final String ORDER_BY_AGGREGATION_SPILL_ENABLED = "order_by_aggregation_spill_enabled";
     public static final String WINDOW_SPILL_ENABLED = "window_spill_enabled";
     public static final String ORDER_BY_SPILL_ENABLED = "order_by_spill_enabled";
@@ -209,9 +212,14 @@ public final class SystemSessionProperties
     public static final String RESOURCE_AWARE_SCHEDULING_STRATEGY = "resource_aware_scheduling_strategy";
     public static final String HEAP_DUMP_ON_EXCEEDED_MEMORY_LIMIT_ENABLED = "heap_dump_on_exceeded_memory_limit_enabled";
     public static final String EXCEEDED_MEMORY_LIMIT_HEAP_DUMP_FILE_DIRECTORY = "exceeded_memory_limit_heap_dump_file_directory";
+    public static final String DISTRIBUTED_TRACING_MODE = "distributed_tracing_mode";
+    public static final String VERBOSE_RUNTIME_STATS_ENABLED = "verbose_runtime_stats_enabled";
 
     //TODO: Prestissimo related session properties that are temporarily put here. They will be relocated in the future
     public static final String PRESTISSIMO_SIMPLIFIED_EXPRESSION_EVALUATION_ENABLED = "simplified_expression_evaluation_enabled";
+    public static final String KEY_BASED_SAMPLING_ENABLED = "key_based_sampling_enabled";
+    public static final String KEY_BASED_SAMPLING_PERCENTAGE = "key_based_sampling_percentage";
+    public static final String KEY_BASED_SAMPLING_FUNCTION = "key_based_sampling_function";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -225,7 +233,8 @@ public final class SystemSessionProperties
                 new NodeMemoryConfig(),
                 new WarningCollectorConfig(),
                 new NodeSchedulerConfig(),
-                new NodeSpillConfig());
+                new NodeSpillConfig(),
+                new TracingConfig());
     }
 
     @Inject
@@ -237,7 +246,8 @@ public final class SystemSessionProperties
             NodeMemoryConfig nodeMemoryConfig,
             WarningCollectorConfig warningCollectorConfig,
             NodeSchedulerConfig nodeSchedulerConfig,
-            NodeSpillConfig nodeSpillConfig)
+            NodeSpillConfig nodeSpillConfig,
+            TracingConfig tracingConfig)
     {
         sessionProperties = ImmutableList.of(
                 stringProperty(
@@ -507,8 +517,13 @@ public final class SystemSessionProperties
                         Duration::toString),
                 booleanProperty(
                         OPTIMIZE_METADATA_QUERIES,
-                        "Enable optimization for metadata queries. Note if metadata entry has empty data, the result might be different (e.g. empty Hive partition)",
+                        "Enable optimization for metadata queries if the resulting partitions are not empty according to the partition stats",
                         featuresConfig.isOptimizeMetadataQueries(),
+                        false),
+                booleanProperty(
+                        OPTIMIZE_METADATA_QUERIES_IGNORE_STATS,
+                        "Enable optimization for metadata queries. Note if metadata entry has empty data, the result might be different (e.g. empty Hive partition)",
+                        featuresConfig.isOptimizeMetadataQueriesIgnoreStats(),
                         false),
                 integerProperty(
                         QUERY_PRIORITY,
@@ -622,6 +637,11 @@ public final class SystemSessionProperties
                         DISTINCT_AGGREGATION_SPILL_ENABLED,
                         "Enable spill for distinct aggregations if spill_enabled and aggregation_spill_enabled",
                         featuresConfig.isDistinctAggregationSpillEnabled(),
+                        false),
+                booleanProperty(
+                        DEDUP_BASED_DISTINCT_AGGREGATION_SPILL_ENABLED,
+                        "Perform deduplication of input data for distinct aggregates before spilling",
+                        featuresConfig.isDedupBasedDistinctAggregationSpillEnabled(),
                         false),
                 booleanProperty(
                         ORDER_BY_AGGREGATION_SPILL_ENABLED,
@@ -1104,6 +1124,16 @@ public final class SystemSessionProperties
                         "Enable query optimization with materialized view",
                         featuresConfig.isQueryOptimizationWithMaterializedViewEnabled(),
                         true),
+                stringProperty(
+                        DISTRIBUTED_TRACING_MODE,
+                        "Mode for distributed tracing. NO_TRACE, ALWAYS_TRACE, or SAMPLE_BASED",
+                        tracingConfig.getDistributedTracingMode().name(),
+                        false),
+                booleanProperty(
+                        VERBOSE_RUNTIME_STATS_ENABLED,
+                        "Enable logging all runtime stats",
+                        featuresConfig.isVerboseRuntimeStatsEnabled(),
+                        false),
                 new PropertyMetadata<>(
                         AGGREGATION_IF_TO_FILTER_REWRITE_STRATEGY,
                         format("Set the strategy used to rewrite AGG IF to AGG FILTER. Options are %s",
@@ -1142,7 +1172,22 @@ public final class SystemSessionProperties
                         EXCEEDED_MEMORY_LIMIT_HEAP_DUMP_FILE_DIRECTORY,
                         "Directory to which heap snapshot will be dumped, if heap_dump_on_exceeded_memory_limit_enabled",
                         System.getProperty("java.io.tmpdir"),   // This is intended to be used for debugging purposes only and thus we does not need an associated config property
-                        true));
+                        true),
+                booleanProperty(
+                        KEY_BASED_SAMPLING_ENABLED,
+                        "Key based sampling of tables enabled",
+                        false,
+                        false),
+                doubleProperty(
+                        KEY_BASED_SAMPLING_PERCENTAGE,
+                        "Percentage of keys to be sampled",
+                        0.01,
+                        false),
+                stringProperty(
+                        KEY_BASED_SAMPLING_FUNCTION,
+                        "Sampling function for key based sampling",
+                        "key_sampling_percent",
+                        false));
     }
 
     public static boolean isEmptyJoinOptimization(Session session)
@@ -1163,6 +1208,21 @@ public final class SystemSessionProperties
     public static boolean isAllowWindowOrderByLiterals(Session session)
     {
         return session.getSystemProperty(ALLOW_WINDOW_ORDER_BY_LITERALS, Boolean.class);
+    }
+
+    public static boolean isKeyBasedSamplingEnabled(Session session)
+    {
+        return session.getSystemProperty(KEY_BASED_SAMPLING_ENABLED, Boolean.class);
+    }
+
+    public static double getKeyBasedSamplingPercentage(Session session)
+    {
+        return session.getSystemProperty(KEY_BASED_SAMPLING_PERCENTAGE, Double.class);
+    }
+
+    public static String getKeyBasedSamplingFunction(Session session)
+    {
+        return session.getSystemProperty(KEY_BASED_SAMPLING_FUNCTION, String.class);
     }
 
     public List<PropertyMetadata<?>> getSessionProperties()
@@ -1306,6 +1366,11 @@ public final class SystemSessionProperties
     public static boolean isOptimizeMetadataQueries(Session session)
     {
         return session.getSystemProperty(OPTIMIZE_METADATA_QUERIES, Boolean.class);
+    }
+
+    public static boolean isOptimizeMetadataQueriesIgnoreStats(Session session)
+    {
+        return session.getSystemProperty(OPTIMIZE_METADATA_QUERIES_IGNORE_STATS, Boolean.class);
     }
 
     public static DataSize getQueryMaxMemory(Session session)
@@ -1462,6 +1527,11 @@ public final class SystemSessionProperties
     public static boolean isDistinctAggregationSpillEnabled(Session session)
     {
         return session.getSystemProperty(DISTINCT_AGGREGATION_SPILL_ENABLED, Boolean.class) && isAggregationSpillEnabled(session);
+    }
+
+    public static boolean isDedupBasedDistinctAggregationSpillEnabled(Session session)
+    {
+        return session.getSystemProperty(DEDUP_BASED_DISTINCT_AGGREGATION_SPILL_ENABLED, Boolean.class);
     }
 
     public static boolean isOrderByAggregationSpillEnabled(Session session)
@@ -1896,6 +1966,11 @@ public final class SystemSessionProperties
     public static boolean isQueryOptimizationWithMaterializedViewEnabled(Session session)
     {
         return session.getSystemProperty(QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED, Boolean.class);
+    }
+
+    public static boolean isVerboseRuntimeStatsEnabled(Session session)
+    {
+        return session.getSystemProperty(VERBOSE_RUNTIME_STATS_ENABLED, Boolean.class);
     }
 
     public static AggregationIfToFilterRewriteStrategy getAggregationIfToFilterRewriteStrategy(Session session)

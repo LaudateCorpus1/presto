@@ -47,6 +47,7 @@ import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.spi.statistics.TableStatistics;
 import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.TypeProvider;
+import com.facebook.presto.sql.planner.VariablesExtractor;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.SortNode;
 import com.facebook.presto.sql.relational.RowExpressionDeterminismEvaluator;
@@ -101,7 +102,7 @@ public class MetadataQueryOptimizer
     @Override
     public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, PlanVariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
-        if (!SystemSessionProperties.isOptimizeMetadataQueries(session)) {
+        if (!SystemSessionProperties.isOptimizeMetadataQueries(session) && !SystemSessionProperties.isOptimizeMetadataQueriesIgnoreStats(session)) {
             return plan;
         }
         return SimplePlanRewriter.rewriteWith(new Optimizer(session, metadata, idAllocator), plan, null);
@@ -114,6 +115,7 @@ public class MetadataQueryOptimizer
         private final Session session;
         private final Metadata metadata;
         private final RowExpressionDeterminismEvaluator determinismEvaluator;
+        private final boolean ignoreMetadataStats;
 
         private Optimizer(Session session, Metadata metadata, PlanNodeIdAllocator idAllocator)
         {
@@ -121,6 +123,7 @@ public class MetadataQueryOptimizer
             this.metadata = metadata;
             this.idAllocator = idAllocator;
             this.determinismEvaluator = new RowExpressionDeterminismEvaluator(metadata);
+            this.ignoreMetadataStats = SystemSessionProperties.isOptimizeMetadataQueriesIgnoreStats(session);
         }
 
         @Override
@@ -178,6 +181,13 @@ public class MetadataQueryOptimizer
                 }
             }
 
+            // Remaining predicate after tuple domain pushdown in getTableLayout(). This doesn't have overlap with discretePredicates.
+            // So it only references non-partition columns. Disable the optimization in this case.
+            Optional<RowExpression> remainingPredicate = layout.getRemainingPredicate();
+            if (remainingPredicate.isPresent() && !VariablesExtractor.extractAll(remainingPredicate.get()).isEmpty()) {
+                return context.defaultRewrite(node);
+            }
+
             // the optimization is only valid if the aggregation node only relies on partition keys
             if (!discretePredicates.getColumns().containsAll(columns.values())) {
                 return context.defaultRewrite(node);
@@ -224,7 +234,7 @@ public class MetadataQueryOptimizer
             }
 
             // replace the tablescan node with a values node
-            return SimplePlanRewriter.rewriteWith(new Replacer(new ValuesNode(idAllocator.getNextId(), inputs, rowsBuilder.build())), node);
+            return SimplePlanRewriter.rewriteWith(new Replacer(new ValuesNode(node.getSourceLocation(), idAllocator.getNextId(), inputs, rowsBuilder.build())), node);
         }
 
         private boolean isReducible(AggregationNode node, List<VariableReferenceExpression> inputs)
@@ -304,8 +314,8 @@ public class MetadataQueryOptimizer
                 }
             }
             Assignments assignments = assignmentsBuilder.build();
-            ValuesNode valuesNode = new ValuesNode(idAllocator.getNextId(), node.getOutputVariables(), ImmutableList.of(new ArrayList<>(assignments.getExpressions())));
-            return new ProjectNode(idAllocator.getNextId(), valuesNode, assignments, LOCAL);
+            ValuesNode valuesNode = new ValuesNode(node.getSourceLocation(), idAllocator.getNextId(), node.getOutputVariables(), ImmutableList.of(new ArrayList<>(assignments.getExpressions())));
+            return new ProjectNode(node.getSourceLocation(), idAllocator.getNextId(), valuesNode, assignments, LOCAL);
         }
 
         /**
@@ -314,6 +324,9 @@ public class MetadataQueryOptimizer
          */
         private boolean hasPositiveRowCount(TableHandle table, TupleDomain<ColumnHandle> tupleDomain)
         {
+            if (ignoreMetadataStats) {
+                return true;
+            }
             TableStatistics tableStatistics = metadata.getTableStatistics(session, table, ImmutableList.of(), new Constraint<>(tupleDomain));
             return !tableStatistics.getRowCount().isUnknown() && tableStatistics.getRowCount().getValue() > 0;
         }

@@ -20,6 +20,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
 
@@ -83,6 +84,14 @@ public class RuntimeStats
         metrics.computeIfAbsent(name, RuntimeMetric::new).addValue(value);
     }
 
+    public void addMetricValueIgnoreZero(String name, long value)
+    {
+        if (value == 0) {
+            return;
+        }
+        addMetricValue(name, value);
+    }
+
     /**
      * Merges {@code metric} into this object with name {@code name}.
      */
@@ -112,5 +121,13 @@ public class RuntimeStats
             return;
         }
         stats.getMetrics().forEach((name, newMetric) -> metrics.computeIfAbsent(name, RuntimeMetric::new).set(newMetric));
+    }
+
+    public <V> V profileNanos(String tag, Supplier<V> supplier)
+    {
+        long startTime = System.nanoTime();
+        V result = supplier.get();
+        addMetricValueIgnoreZero(tag, System.nanoTime() - startTime);
+        return result;
     }
 }

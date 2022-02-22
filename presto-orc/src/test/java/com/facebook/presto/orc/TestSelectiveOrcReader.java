@@ -17,6 +17,14 @@ import com.facebook.presto.common.InvalidFunctionArgumentException;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.block.Block;
+import com.facebook.presto.common.predicate.TupleDomainFilter;
+import com.facebook.presto.common.predicate.TupleDomainFilter.BigintRange;
+import com.facebook.presto.common.predicate.TupleDomainFilter.BigintValuesUsingHashTable;
+import com.facebook.presto.common.predicate.TupleDomainFilter.BooleanValue;
+import com.facebook.presto.common.predicate.TupleDomainFilter.BytesRange;
+import com.facebook.presto.common.predicate.TupleDomainFilter.BytesValues;
+import com.facebook.presto.common.predicate.TupleDomainFilter.DoubleRange;
+import com.facebook.presto.common.predicate.TupleDomainFilter.FloatRange;
 import com.facebook.presto.common.type.CharType;
 import com.facebook.presto.common.type.DecimalType;
 import com.facebook.presto.common.type.SqlDate;
@@ -25,13 +33,6 @@ import com.facebook.presto.common.type.SqlTimestamp;
 import com.facebook.presto.common.type.SqlVarbinary;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.OrcTester.OrcReaderSettings;
-import com.facebook.presto.orc.TupleDomainFilter.BigintRange;
-import com.facebook.presto.orc.TupleDomainFilter.BigintValuesUsingHashTable;
-import com.facebook.presto.orc.TupleDomainFilter.BooleanValue;
-import com.facebook.presto.orc.TupleDomainFilter.BytesRange;
-import com.facebook.presto.orc.TupleDomainFilter.BytesValues;
-import com.facebook.presto.orc.TupleDomainFilter.DoubleRange;
-import com.facebook.presto.orc.TupleDomainFilter.FloatRange;
 import com.facebook.presto.orc.metadata.CompressionKind;
 import com.google.common.base.Strings;
 import com.google.common.collect.AbstractIterator;
@@ -62,6 +63,9 @@ import java.util.function.Function;
 import java.util.stream.IntStream;
 
 import static com.facebook.airlift.testing.Assertions.assertBetweenInclusive;
+import static com.facebook.presto.common.predicate.TupleDomainFilter.IS_NOT_NULL;
+import static com.facebook.presto.common.predicate.TupleDomainFilter.IS_NULL;
+import static com.facebook.presto.common.predicate.TupleDomainFilterUtils.toBigintValues;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.common.type.CharType.createCharType;
@@ -77,6 +81,7 @@ import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.orc.OrcReader.MAX_BATCH_SIZE;
 import static com.facebook.presto.orc.OrcTester.Format.DWRF;
 import static com.facebook.presto.orc.OrcTester.HIVE_STORAGE_TIME_ZONE;
+import static com.facebook.presto.orc.OrcTester.MAX_BLOCK_SIZE;
 import static com.facebook.presto.orc.OrcTester.arrayType;
 import static com.facebook.presto.orc.OrcTester.createCustomOrcSelectiveRecordReader;
 import static com.facebook.presto.orc.OrcTester.mapType;
@@ -84,9 +89,6 @@ import static com.facebook.presto.orc.OrcTester.quickSelectiveOrcTester;
 import static com.facebook.presto.orc.OrcTester.rowType;
 import static com.facebook.presto.orc.OrcTester.writeOrcColumnsPresto;
 import static com.facebook.presto.orc.TestingOrcPredicate.createOrcPredicate;
-import static com.facebook.presto.orc.TupleDomainFilter.IS_NOT_NULL;
-import static com.facebook.presto.orc.TupleDomainFilter.IS_NULL;
-import static com.facebook.presto.orc.TupleDomainFilterUtils.toBigintValues;
 import static com.facebook.presto.orc.metadata.CompressionKind.NONE;
 import static com.facebook.presto.orc.metadata.CompressionKind.ZLIB;
 import static com.facebook.presto.orc.metadata.CompressionKind.ZSTD;
@@ -102,6 +104,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.nCopies;
 import static java.util.stream.Collectors.toList;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
@@ -841,6 +844,8 @@ public class TestSelectiveOrcReader
 
         // dataStream is null and lengths are 0
         tester.testRoundTrip(VARCHAR, newArrayList("", null), toSubfieldFilters(stringNotEquals(true, "")));
+
+        tester.testRoundTrip(VARCHAR, newArrayList("", ""), toSubfieldFilters(stringLessThan(true, "")));
     }
 
     @Test
@@ -1063,6 +1068,61 @@ public class TestSelectiveOrcReader
     }
 
     @Test
+    public void testAdaptiveBatchSizes()
+            throws Exception
+    {
+        Type type = VARCHAR;
+        List<Type> types = ImmutableList.of(type);
+
+        TempFile tempFile = new TempFile();
+        List<String> values = new ArrayList<>();
+        int rowCount = 10000;
+        int longStringLength = 5000;
+        Random random = new Random();
+        long start = System.currentTimeMillis();
+        for (int i = 0; i < rowCount; ++i) {
+            if (i < MAX_BATCH_SIZE) {
+                StringBuilder builder = new StringBuilder();
+                for (int j = 0; j < longStringLength; ++j) {
+                    builder.append(random.nextInt(10));
+                }
+                values.add(builder.toString());
+            }
+            else {
+                values.add("");
+            }
+        }
+        System.out.println(System.currentTimeMillis() - start);
+        writeOrcColumnsPresto(tempFile.getFile(), DWRF, NONE, Optional.empty(), types, ImmutableList.of(values), new OrcWriterStats());
+
+        try (OrcSelectiveRecordReader recordReader = createCustomOrcSelectiveRecordReader(tempFile, OrcEncoding.DWRF, OrcPredicate.TRUE, type, MAX_BATCH_SIZE, false)) {
+            assertEquals(recordReader.getFileRowCount(), rowCount);
+            assertEquals(recordReader.getReaderRowCount(), rowCount);
+            assertEquals(recordReader.getFilePosition(), 0);
+            assertEquals(recordReader.getReaderPosition(), 0);
+
+            // Size of the first batch should equal to the initial batch size (set to MAX_BATCH_SIZE)
+            Page page = recordReader.getNextPage();
+            assertNotNull(page);
+            page = page.getLoadedPage();
+            assertEquals(page.getPositionCount(), MAX_BATCH_SIZE);
+
+            // Later batches should be adjusted based on maxCombinedBytesPerRow collected during the first batch read
+            while (true) {
+                page = recordReader.getNextPage();
+                assertNotNull(page);
+                page = page.getLoadedPage();
+                if (recordReader.getReadPositions() < rowCount) {
+                    assertEquals(page.getPositionCount(), MAX_BLOCK_SIZE.toBytes() / (longStringLength + Integer.BYTES + Byte.BYTES));
+                }
+                else {
+                    break;
+                }
+            }
+        }
+    }
+
+    @Test
     public void testHiddenConstantColumns()
             throws Exception
     {
@@ -1178,6 +1238,11 @@ public class TestSelectiveOrcReader
     private static TupleDomainFilter stringBetween(boolean nullAllowed, String upper, String lower)
     {
         return BytesRange.of(lower.getBytes(), false, upper.getBytes(), false, nullAllowed);
+    }
+
+    private static TupleDomainFilter stringLessThan(boolean nullAllowed, String upper)
+    {
+        return BytesRange.of(null, true, upper.getBytes(), true, nullAllowed);
     }
 
     private static TupleDomainFilter stringEquals(boolean nullAllowed, String value)

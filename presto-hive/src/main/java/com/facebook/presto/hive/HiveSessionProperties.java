@@ -35,6 +35,8 @@ import static com.facebook.presto.common.type.VarcharType.createUnboundedVarchar
 import static com.facebook.presto.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.APPEND;
 import static com.facebook.presto.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.ERROR;
 import static com.facebook.presto.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.OVERWRITE;
+import static com.facebook.presto.hive.metastore.MetastoreUtil.METASTORE_HEADERS;
+import static com.facebook.presto.hive.metastore.MetastoreUtil.USER_DEFINED_TYPE_ENCODING_ENABLED;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static com.facebook.presto.spi.session.PropertyMetadata.booleanProperty;
 import static com.facebook.presto.spi.session.PropertyMetadata.integerProperty;
@@ -123,6 +125,14 @@ public final class HiveSessionProperties
     public static final String OPTIMIZED_PARTITION_UPDATE_SERIALIZATION_ENABLED = "optimized_partition_update_serialization_enabled";
     public static final String PARTITION_LEASE_DURATION = "partition_lease_duration";
     public static final String CACHE_ENABLED = "cache_enabled";
+    public static final String ENABLE_LOOSE_MEMORY_BASED_ACCOUNTING = "enable_loose_memory_based_accounting";
+    public static final String MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD = "materialized_view_missing_partitions_threshold";
+    public static final String VERBOSE_RUNTIME_STATS_ENABLED = "verbose_runtime_stats_enabled";
+    private static final String DWRF_WRITER_STRIPE_CACHE_ENABLED = "dwrf_writer_stripe_cache_enabled";
+    private static final String DWRF_WRITER_STRIPE_CACHE_SIZE = "dwrf_writer_stripe_cache_size";
+    public static final String SIZE_BASED_SPLIT_WEIGHTS_ENABLED = "size_based_split_weights_enabled";
+    public static final String MINIMUM_ASSIGNED_SPLIT_WEIGHT = "minimum_assigned_split_weight";
+    private static final String USE_RECORD_PAGE_SOURCE_FOR_CUSTOM_SPLIT = "use_record_page_source_for_custom_split";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -581,6 +591,66 @@ public final class HiveSessionProperties
                         CACHE_ENABLED,
                         "Enable cache for hive",
                         cacheConfig.isCachingEnabled(),
+                        false),
+                booleanProperty(
+                        VERBOSE_RUNTIME_STATS_ENABLED,
+                        "Enable tracking all runtime stats. Note that this may affect query performance.",
+                        hiveClientConfig.isVerboseRuntimeStatsEnabled(),
+                        false),
+                booleanProperty(
+                        ENABLE_LOOSE_MEMORY_BASED_ACCOUNTING,
+                        "Enable loose memory accounting to avoid OOMing existing queries",
+                        hiveClientConfig.isLooseMemoryAccountingEnabled(),
+                        false),
+                integerProperty(
+                        MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD,
+                        "Materialized views with missing partitions more than this threshold falls back to the base tables at read time",
+                        hiveClientConfig.getMaterializedViewMissingPartitionsThreshold(),
+                        true),
+                stringProperty(
+                        METASTORE_HEADERS,
+                        "The headers that will be sent in the calls to Metastore",
+                        null,
+                        false),
+                booleanProperty(
+                        USER_DEFINED_TYPE_ENCODING_ENABLED,
+                        "Enable user defined type",
+                        hiveClientConfig.isUserDefinedTypeEncodingEnabled(),
+                        false),
+                booleanProperty(
+                        DWRF_WRITER_STRIPE_CACHE_ENABLED,
+                        "Write stripe cache for the DWRF files.",
+                        orcFileWriterConfig.isDwrfStripeCacheEnabled(),
+                        false),
+                dataSizeSessionProperty(
+                        DWRF_WRITER_STRIPE_CACHE_SIZE,
+                        "Maximum size of DWRF stripe cache to be held in memory",
+                        orcFileWriterConfig.getDwrfStripeCacheMaxSize(),
+                        false),
+                booleanProperty(
+                        SIZE_BASED_SPLIT_WEIGHTS_ENABLED,
+                        "Enable estimating split weights based on size in bytes",
+                        hiveClientConfig.isSizeBasedSplitWeightsEnabled(),
+                        false),
+                new PropertyMetadata<>(
+                        MINIMUM_ASSIGNED_SPLIT_WEIGHT,
+                        "Minimum assigned split weight when size based split weighting is enabled",
+                        DOUBLE,
+                        Double.class,
+                        hiveClientConfig.getMinimumAssignedSplitWeight(),
+                        false,
+                        value -> {
+                            double doubleValue = ((Number) value).doubleValue();
+                            if (!Double.isFinite(doubleValue) || doubleValue <= 0 || doubleValue > 1) {
+                                throw new PrestoException(INVALID_SESSION_PROPERTY, format("%s must be > 0 and <= 1.0: %s", MINIMUM_ASSIGNED_SPLIT_WEIGHT, value));
+                            }
+                            return doubleValue;
+                        },
+                        value -> value),
+                booleanProperty(
+                        USE_RECORD_PAGE_SOURCE_FOR_CUSTOM_SPLIT,
+                        "Use record page source for custom split",
+                        hiveClientConfig.isUseRecordPageSourceForCustomSplit(),
                         false));
     }
 
@@ -1015,5 +1085,45 @@ public final class HiveSessionProperties
     public static boolean isCacheEnabled(ConnectorSession session)
     {
         return session.getProperty(CACHE_ENABLED, Boolean.class);
+    }
+
+    public static boolean isExecutionBasedMemoryAccountingEnabled(ConnectorSession session)
+    {
+        return session.getProperty(ENABLE_LOOSE_MEMORY_BASED_ACCOUNTING, Boolean.class);
+    }
+
+    public static int getMaterializedViewMissingPartitionsThreshold(ConnectorSession session)
+    {
+        return session.getProperty(MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD, Integer.class);
+    }
+
+    public static boolean isVerboseRuntimeStatsEnabled(ConnectorSession session)
+    {
+        return session.getProperty(VERBOSE_RUNTIME_STATS_ENABLED, Boolean.class);
+    }
+
+    public static boolean isDwrfWriterStripeCacheEnabled(ConnectorSession session)
+    {
+        return session.getProperty(DWRF_WRITER_STRIPE_CACHE_ENABLED, Boolean.class);
+    }
+
+    public static DataSize getDwrfWriterStripeCacheeMaxSize(ConnectorSession session)
+    {
+        return session.getProperty(DWRF_WRITER_STRIPE_CACHE_SIZE, DataSize.class);
+    }
+
+    public static boolean isSizeBasedSplitWeightsEnabled(ConnectorSession session)
+    {
+        return session.getProperty(SIZE_BASED_SPLIT_WEIGHTS_ENABLED, Boolean.class);
+    }
+
+    public static double getMinimumAssignedSplitWeight(ConnectorSession session)
+    {
+        return session.getProperty(MINIMUM_ASSIGNED_SPLIT_WEIGHT, Double.class);
+    }
+
+    public static boolean isUseRecordPageSourceForCustomSplit(ConnectorSession session)
+    {
+        return session.getProperty(USE_RECORD_PAGE_SOURCE_FOR_CUSTOM_SPLIT, Boolean.class);
     }
 }

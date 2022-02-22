@@ -193,6 +193,17 @@ public class HiveClientConfig
 
     private Duration partitionLeaseDuration = new Duration(0, TimeUnit.SECONDS);
 
+    private boolean enableLooseMemoryAccounting;
+    private int materializedViewMissingPartitionsThreshold = 100;
+
+    private boolean verboseRuntimeStatsEnabled;
+    private boolean useRecordPageSourceForCustomSplit = true;
+
+    private boolean sizeBasedSplitWeightsEnabled = true;
+    private double minimumAssignedSplitWeight = 0.05;
+
+    private boolean userDefinedTypeEncodingEnabled;
+
     public int getMaxInitialSplits()
     {
         return maxInitialSplits;
@@ -308,6 +319,18 @@ public class HiveClientConfig
     public HiveClientConfig setRecursiveDirWalkerEnabled(boolean recursiveDirWalkerEnabled)
     {
         this.recursiveDirWalkerEnabled = recursiveDirWalkerEnabled;
+        return this;
+    }
+
+    public boolean isUserDefinedTypeEncodingEnabled()
+    {
+        return userDefinedTypeEncodingEnabled;
+    }
+
+    @Config("hive.user-defined-type-encoding-enabled")
+    public HiveClientConfig setUserDefinedTypeEncodingEnabled(boolean userDefinedTypeEncodingEnabled)
+    {
+        this.userDefinedTypeEncodingEnabled = userDefinedTypeEncodingEnabled;
         return this;
     }
 
@@ -1626,6 +1649,19 @@ public class HiveClientConfig
         return optimizedPartitionUpdateSerializationEnabled;
     }
 
+    @Config("hive.verbose-runtime-stats-enabled")
+    @ConfigDescription("Enable tracking all runtime stats. Note that this may affect query performance")
+    public HiveClientConfig setVerboseRuntimeStatsEnabled(boolean verboseRuntimeStatsEnabled)
+    {
+        this.verboseRuntimeStatsEnabled = verboseRuntimeStatsEnabled;
+        return this;
+    }
+
+    public boolean isVerboseRuntimeStatsEnabled()
+    {
+        return verboseRuntimeStatsEnabled;
+    }
+
     @Config("hive.partition-lease-duration")
     @ConfigDescription("Partition lease duration")
     public HiveClientConfig setPartitionLeaseDuration(Duration partitionLeaseDuration)
@@ -1637,5 +1673,71 @@ public class HiveClientConfig
     public Duration getPartitionLeaseDuration()
     {
         return partitionLeaseDuration;
+    }
+
+    public boolean isLooseMemoryAccountingEnabled()
+    {
+        return enableLooseMemoryAccounting;
+    }
+
+    @Config("hive.loose-memory-accounting-enabled")
+    @ConfigDescription("When enabled relaxes memory accounting for queries violating memory limits to run that previously honored memory thresholds.")
+    public HiveClientConfig setLooseMemoryAccountingEnabled(boolean enableLooseMemoryAccounting)
+    {
+        this.enableLooseMemoryAccounting = enableLooseMemoryAccounting;
+        return this;
+    }
+
+    @Config("hive.materialized-view-missing-partitions-threshold")
+    @ConfigDescription("Materialized views with missing partitions more than this threshold falls back to the base tables at read time")
+    public HiveClientConfig setMaterializedViewMissingPartitionsThreshold(int materializedViewMissingPartitionsThreshold)
+    {
+        this.materializedViewMissingPartitionsThreshold = materializedViewMissingPartitionsThreshold;
+        return this;
+    }
+
+    public int getMaterializedViewMissingPartitionsThreshold()
+    {
+        return this.materializedViewMissingPartitionsThreshold;
+    }
+
+    @Config("hive.size-based-split-weights-enabled")
+    public HiveClientConfig setSizeBasedSplitWeightsEnabled(boolean sizeBasedSplitWeightsEnabled)
+    {
+        this.sizeBasedSplitWeightsEnabled = sizeBasedSplitWeightsEnabled;
+        return this;
+    }
+
+    public boolean isSizeBasedSplitWeightsEnabled()
+    {
+        return sizeBasedSplitWeightsEnabled;
+    }
+
+    @Config("hive.minimum-assigned-split-weight")
+    @ConfigDescription("Minimum weight that a split can be assigned when size based split weights are enabled")
+    public HiveClientConfig setMinimumAssignedSplitWeight(double minimumAssignedSplitWeight)
+    {
+        this.minimumAssignedSplitWeight = minimumAssignedSplitWeight;
+        return this;
+    }
+
+    @DecimalMax("1.0") // standard split weight
+    @DecimalMin(value = "0", inclusive = false)
+    public double getMinimumAssignedSplitWeight()
+    {
+        return minimumAssignedSplitWeight;
+    }
+
+    public boolean isUseRecordPageSourceForCustomSplit()
+    {
+        return this.useRecordPageSourceForCustomSplit;
+    }
+
+    @Config("hive.use-record-page-source-for-custom-split")
+    @ConfigDescription("Use record page source for custom split. By default, true. Used to query MOR tables in Hudi.")
+    public HiveClientConfig setUseRecordPageSourceForCustomSplit(boolean useRecordPageSourceForCustomSplit)
+    {
+        this.useRecordPageSourceForCustomSplit = useRecordPageSourceForCustomSplit;
+        return this;
     }
 }

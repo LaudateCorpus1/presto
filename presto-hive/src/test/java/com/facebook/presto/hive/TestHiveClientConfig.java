@@ -153,7 +153,14 @@ public class TestHiveClientConfig
                 .setManifestVerificationEnabled(false)
                 .setUndoMetastoreOperationsEnabled(true)
                 .setOptimizedPartitionUpdateSerializationEnabled(false)
-                .setPartitionLeaseDuration(new Duration(0, TimeUnit.SECONDS)));
+                .setVerboseRuntimeStatsEnabled(false)
+                .setPartitionLeaseDuration(new Duration(0, TimeUnit.SECONDS))
+                .setMaterializedViewMissingPartitionsThreshold(100)
+                .setLooseMemoryAccountingEnabled(false)
+                .setSizeBasedSplitWeightsEnabled(true)
+                .setMinimumAssignedSplitWeight(0.05)
+                .setUserDefinedTypeEncodingEnabled(false)
+                .setUseRecordPageSourceForCustomSplit(true));
     }
 
     @Test
@@ -268,6 +275,13 @@ public class TestHiveClientConfig
                 .put("hive.undo-metastore-operations-enabled", "false")
                 .put("hive.experimental-optimized-partition-update-serialization-enabled", "true")
                 .put("hive.partition-lease-duration", "4h")
+                .put("hive.loose-memory-accounting-enabled", "true")
+                .put("hive.verbose-runtime-stats-enabled", "true")
+                .put("hive.materialized-view-missing-partitions-threshold", "50")
+                .put("hive.size-based-split-weights-enabled", "false")
+                .put("hive.user-defined-type-encoding-enabled", "true")
+                .put("hive.minimum-assigned-split-weight", "1.0")
+                .put("hive.use-record-page-source-for-custom-split", "false")
                 .build();
 
         HiveClientConfig expected = new HiveClientConfig()
@@ -378,7 +392,14 @@ public class TestHiveClientConfig
                 .setManifestVerificationEnabled(true)
                 .setUndoMetastoreOperationsEnabled(false)
                 .setOptimizedPartitionUpdateSerializationEnabled(true)
-                .setPartitionLeaseDuration(new Duration(4, TimeUnit.HOURS));
+                .setVerboseRuntimeStatsEnabled(true)
+                .setPartitionLeaseDuration(new Duration(4, TimeUnit.HOURS))
+                .setMaterializedViewMissingPartitionsThreshold(50)
+                .setLooseMemoryAccountingEnabled(true)
+                .setSizeBasedSplitWeightsEnabled(false)
+                .setMinimumAssignedSplitWeight(1.0)
+                .setUserDefinedTypeEncodingEnabled(true)
+                .setUseRecordPageSourceForCustomSplit(false);
 
         ConfigAssertions.assertFullMapping(properties, expected);
     }

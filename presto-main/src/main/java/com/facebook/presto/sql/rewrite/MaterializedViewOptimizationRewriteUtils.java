@@ -18,6 +18,7 @@ import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ConnectorMaterializedViewDefinition;
+import com.facebook.presto.spi.MaterializedViewStatus;
 import com.facebook.presto.sql.analyzer.MaterializedViewCandidateExtractor;
 import com.facebook.presto.sql.analyzer.MaterializedViewQueryOptimizer;
 import com.facebook.presto.sql.parser.SqlParser;
@@ -27,6 +28,8 @@ import com.facebook.presto.sql.tree.Query;
 import com.facebook.presto.sql.tree.Table;
 
 import java.util.Set;
+
+import static com.facebook.presto.common.RuntimeMetricName.OPTIMIZED_WITH_MATERIALIZED_VIEW;
 
 public class MaterializedViewOptimizationRewriteUtils
 {
@@ -42,12 +45,19 @@ public class MaterializedViewOptimizationRewriteUtils
         MaterializedViewCandidateExtractor materializedViewCandidateExtractor = new MaterializedViewCandidateExtractor(session, metadata);
         materializedViewCandidateExtractor.process(node);
         Set<QualifiedObjectName> materializedViewCandidates = materializedViewCandidateExtractor.getMaterializedViewCandidates();
-        if (materializedViewCandidates.isEmpty()) {
-            return node;
-        }
         // TODO: Select the most compatible and efficient materialized view for query rewrite optimization https://github.com/prestodb/presto/issues/16431
-        Query optimizedQuery = getQueryWithMaterializedViewOptimization(metadata, session, sqlParser, accessControl, node, materializedViewCandidates.iterator().next());
-        return optimizedQuery;
+        // TODO: Refactor query optimization code https://github.com/prestodb/presto/issues/16759
+        for (QualifiedObjectName candidate : materializedViewCandidates) {
+            Query optimizedQuery = getQueryWithMaterializedViewOptimization(metadata, session, sqlParser, accessControl, node, candidate);
+            if (node != optimizedQuery) {
+                MaterializedViewStatus materializedViewStatus = metadata.getMaterializedViewStatus(session, candidate);
+                if (materializedViewStatus.isFullyMaterialized() || materializedViewStatus.isPartiallyMaterialized()) {
+                    session.getRuntimeStats().addMetricValue(OPTIMIZED_WITH_MATERIALIZED_VIEW, 1);
+                    return optimizedQuery;
+                }
+            }
+        }
+        return node;
     }
 
     private static Query getQueryWithMaterializedViewOptimization(

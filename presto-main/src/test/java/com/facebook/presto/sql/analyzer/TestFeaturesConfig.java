@@ -78,6 +78,7 @@ public class TestFeaturesConfig
                 .setWriterMinSize(new DataSize(32, MEGABYTE))
                 .setOptimizedScaleWriterProducerBuffer(false)
                 .setOptimizeMetadataQueries(false)
+                .setOptimizeMetadataQueriesIgnoreStats(false)
                 .setOptimizeHashGeneration(true)
                 .setPushTableWriteThroughUnion(true)
                 .setDictionaryAggregation(false)
@@ -93,6 +94,7 @@ public class TestFeaturesConfig
                 .setJoinSpillingEnabled(true)
                 .setAggregationSpillEnabled(true)
                 .setDistinctAggregationSpillEnabled(true)
+                .setDedupBasedDistinctAggregationSpillEnabled(false)
                 .setOrderByAggregationSpillEnabled(true)
                 .setWindowSpillEnabled(true)
                 .setOrderBySpillEnabled(true)
@@ -179,6 +181,7 @@ public class TestFeaturesConfig
                 .setPartialResultsMaxExecutionTimeMultiplier(2.0)
                 .setMaterializedViewDataConsistencyEnabled(true)
                 .setQueryOptimizationWithMaterializedViewEnabled(false)
+                .setVerboseRuntimeStatsEnabled(false)
                 .setAggregationIfToFilterRewriteStrategy(AggregationIfToFilterRewriteStrategy.DISABLED));
     }
 
@@ -229,6 +232,7 @@ public class TestFeaturesConfig
                 .put("writer-min-size", "42GB")
                 .put("optimized-scale-writer-producer-buffer", "true")
                 .put("optimizer.optimize-metadata-queries", "true")
+                .put("optimizer.optimize-metadata-queries-ignore-stats", "true")
                 .put("optimizer.optimize-hash-generation", "false")
                 .put("optimizer.optimize-mixed-distinct-aggregations", "true")
                 .put("optimizer.push-table-write-through-union", "false")
@@ -242,6 +246,7 @@ public class TestFeaturesConfig
                 .put("experimental.join-spill-enabled", "false")
                 .put("experimental.aggregation-spill-enabled", "false")
                 .put("experimental.distinct-aggregation-spill-enabled", "false")
+                .put("experimental.dedup-based-distinct-aggregation-spill-enabled", "true")
                 .put("experimental.order-by-aggregation-spill-enabled", "false")
                 .put("experimental.window-spill-enabled", "false")
                 .put("experimental.order-by-spill-enabled", "false")
@@ -309,6 +314,7 @@ public class TestFeaturesConfig
                 .put("offset-clause-enabled", "true")
                 .put("materialized-view-data-consistency-enabled", "false")
                 .put("query-optimization-with-materialized-view-enabled", "true")
+                .put("verbose-runtime-stats-enabled", "true")
                 .put("optimizer.aggregation-if-to-filter-rewrite-strategy", "filter_with_if")
                 .build();
 
@@ -347,6 +353,7 @@ public class TestFeaturesConfig
                 .setWriterMinSize(new DataSize(42, GIGABYTE))
                 .setOptimizedScaleWriterProducerBuffer(true)
                 .setOptimizeMetadataQueries(true)
+                .setOptimizeMetadataQueriesIgnoreStats(true)
                 .setOptimizeHashGeneration(false)
                 .setOptimizeMixedDistinctAggregations(true)
                 .setPushTableWriteThroughUnion(false)
@@ -364,6 +371,7 @@ public class TestFeaturesConfig
                 .setJoinSpillingEnabled(false)
                 .setAggregationSpillEnabled(false)
                 .setDistinctAggregationSpillEnabled(false)
+                .setDedupBasedDistinctAggregationSpillEnabled(true)
                 .setOrderByAggregationSpillEnabled(false)
                 .setWindowSpillEnabled(false)
                 .setOrderBySpillEnabled(false)
@@ -437,6 +445,7 @@ public class TestFeaturesConfig
                 .setPartialResultsMaxExecutionTimeMultiplier(1.5)
                 .setMaterializedViewDataConsistencyEnabled(false)
                 .setQueryOptimizationWithMaterializedViewEnabled(true)
+                .setVerboseRuntimeStatsEnabled(true)
                 .setAggregationIfToFilterRewriteStrategy(AggregationIfToFilterRewriteStrategy.FILTER_WITH_IF);
         assertFullMapping(properties, expected);
     }

@@ -27,6 +27,7 @@ import com.facebook.presto.execution.scheduler.NodeScheduler;
 import com.facebook.presto.execution.scheduler.NodeSchedulerConfig;
 import com.facebook.presto.execution.scheduler.TableWriteInfo;
 import com.facebook.presto.execution.scheduler.nodeSelection.NodeSelectionStats;
+import com.facebook.presto.execution.scheduler.nodeSelection.SimpleTtlNodeSelectorConfig;
 import com.facebook.presto.index.IndexManager;
 import com.facebook.presto.memory.MemoryManagerConfig;
 import com.facebook.presto.metadata.ConnectorMetadataUpdaterManager;
@@ -104,7 +105,7 @@ public final class TaskTestUtils
 
     public static final ImmutableList<TaskSource> EMPTY_SOURCES = ImmutableList.of();
 
-    public static final VariableReferenceExpression VARIABLE = new VariableReferenceExpression("column", BIGINT);
+    public static final VariableReferenceExpression VARIABLE = new VariableReferenceExpression(Optional.empty(), "column", BIGINT);
 
     public static final PlanFragment PLAN_FRAGMENT = createPlanFragment();
 
@@ -113,6 +114,7 @@ public final class TaskTestUtils
         return new PlanFragment(
                 new PlanFragmentId(0),
                 new TableScanNode(
+                        Optional.empty(),
                         TABLE_SCAN_NODE_ID,
                         new TableHandle(CONNECTOR_ID, new TestingTableHandle(), TRANSACTION_HANDLE, Optional.empty()),
                         ImmutableList.of(VARIABLE),
@@ -146,7 +148,8 @@ public final class TaskTestUtils
                 new NodeSchedulerConfig().setIncludeCoordinator(true),
                 new NodeTaskMap(finalizerService),
                 new ThrowingNodeTtlFetcherManager(),
-                new NoOpQueryManager());
+                new NoOpQueryManager(),
+                new SimpleTtlNodeSelectorConfig());
         PartitioningProviderManager partitioningProviderManager = new PartitioningProviderManager();
         NodePartitioningManager nodePartitioningManager = new NodePartitioningManager(nodeScheduler, partitioningProviderManager, new NodeSelectionStats());
 

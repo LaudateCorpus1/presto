@@ -47,7 +47,6 @@ import java.util.Optional;
 import static com.facebook.presto.server.security.RoleType.ADMIN;
 import static com.facebook.presto.server.security.RoleType.USER;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.net.HttpHeaders.X_FORWARDED_PROTO;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -110,6 +109,7 @@ public class ClusterStatsResource
         }
 
         long runningDrivers = 0;
+        long runningTasks = 0;
         double memoryReservation = 0;
 
         long totalInputRows = dispatchManager.getStats().getConsumedInputRows().getTotalCount();
@@ -136,6 +136,7 @@ public class ClusterStatsResource
 
                 memoryReservation += query.getQueryStats().getUserMemoryReservation().toBytes();
                 runningDrivers += query.getQueryStats().getRunningDrivers();
+                runningTasks += query.getQueryStats().getRunningTasks();
             }
         }
 
@@ -145,6 +146,7 @@ public class ClusterStatsResource
                 queuedQueries,
                 activeNodes,
                 runningDrivers,
+                runningTasks,
                 memoryReservation,
                 totalInputRows,
                 totalInputBytes,
@@ -187,10 +189,9 @@ public class ClusterStatsResource
                 return;
             }
             InternalNode resourceManagerNode = resourceManagers.next();
-            String scheme = isNullOrEmpty(xForwardedProto) ? uriInfo.getRequestUri().getScheme() : xForwardedProto;
 
             URI uri = uriInfo.getRequestUriBuilder()
-                    .scheme(scheme)
+                    .scheme(resourceManagerNode.getInternalUri().getScheme())
                     .host(resourceManagerNode.getHostAndPort().toInetAddress().getHostName())
                     .port(resourceManagerNode.getInternalUri().getPort())
                     .build();
@@ -209,6 +210,7 @@ public class ClusterStatsResource
 
         private final long activeWorkers;
         private final long runningDrivers;
+        private final long runningTasks;
         private final double reservedMemory;
 
         private final long totalInputRows;
@@ -223,6 +225,7 @@ public class ClusterStatsResource
                 @JsonProperty("queuedQueries") long queuedQueries,
                 @JsonProperty("activeWorkers") long activeWorkers,
                 @JsonProperty("runningDrivers") long runningDrivers,
+                @JsonProperty("runningTasks") long runningTasks,
                 @JsonProperty("reservedMemory") double reservedMemory,
                 @JsonProperty("totalInputRows") long totalInputRows,
                 @JsonProperty("totalInputBytes") long totalInputBytes,
@@ -234,6 +237,7 @@ public class ClusterStatsResource
             this.queuedQueries = queuedQueries;
             this.activeWorkers = activeWorkers;
             this.runningDrivers = runningDrivers;
+            this.runningTasks = runningTasks;
             this.reservedMemory = reservedMemory;
             this.totalInputRows = totalInputRows;
             this.totalInputBytes = totalInputBytes;
@@ -269,6 +273,12 @@ public class ClusterStatsResource
         public long getRunningDrivers()
         {
             return runningDrivers;
+        }
+
+        @JsonProperty
+        public long getRunningTasks()
+        {
+            return runningTasks;
         }
 
         @JsonProperty

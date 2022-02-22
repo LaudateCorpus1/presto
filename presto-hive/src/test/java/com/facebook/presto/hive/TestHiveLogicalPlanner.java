@@ -42,6 +42,7 @@ import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.ConstantExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.planner.Plan;
 import com.facebook.presto.sql.planner.assertions.ExpectedValueProvider;
@@ -77,10 +78,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static com.facebook.presto.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_METADATA_QUERIES;
+import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_METADATA_QUERIES_IGNORE_STATS;
 import static com.facebook.presto.SystemSessionProperties.PUSHDOWN_DEREFERENCE_ENABLED;
 import static com.facebook.presto.SystemSessionProperties.QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED;
 import static com.facebook.presto.common.function.OperatorType.EQUAL;
@@ -102,6 +105,7 @@ import static com.facebook.presto.hive.HiveColumnHandle.isPushedDownSubfield;
 import static com.facebook.presto.hive.HiveMetadata.REFERENCED_MATERIALIZED_VIEWS;
 import static com.facebook.presto.hive.HiveQueryRunner.HIVE_CATALOG;
 import static com.facebook.presto.hive.HiveSessionProperties.COLLECT_COLUMN_STATISTICS_ON_WRITE;
+import static com.facebook.presto.hive.HiveSessionProperties.MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD;
 import static com.facebook.presto.hive.HiveSessionProperties.PARQUET_DEREFERENCE_PUSHDOWN_ENABLED;
 import static com.facebook.presto.hive.HiveSessionProperties.PARTIAL_AGGREGATION_PUSHDOWN_ENABLED;
 import static com.facebook.presto.hive.HiveSessionProperties.PARTIAL_AGGREGATION_PUSHDOWN_FOR_VARIABLE_LENGTH_DATATYPES_ENABLED;
@@ -136,6 +140,10 @@ import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE_STREAMING;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
+import static com.facebook.presto.sql.planner.plan.JoinNode.Type.LEFT;
+import static com.facebook.presto.testing.TestingAccessControlManager.TestingPrivilegeType.INSERT_TABLE;
+import static com.facebook.presto.testing.TestingAccessControlManager.TestingPrivilegeType.SELECT_COLUMN;
+import static com.facebook.presto.testing.TestingAccessControlManager.privilege;
 import static com.facebook.presto.testing.assertions.Assert.assertEquals;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -148,6 +156,7 @@ import static io.airlift.tpch.TpchTable.NATION;
 import static io.airlift.tpch.TpchTable.ORDERS;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
@@ -266,7 +275,7 @@ public class TestHiveLogicalPlanner
                                 functionAndTypeManager.lookupFunction("mod", fromTypes(BIGINT, BIGINT)),
                                 BIGINT,
                                 ImmutableList.of(
-                                        new VariableReferenceExpression("orderkey", BIGINT),
+                                        new VariableReferenceExpression(Optional.empty(), "orderkey", BIGINT),
                                         constant(2))),
                         constant(1)));
 
@@ -362,16 +371,12 @@ public class TestHiveLogicalPlanner
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT DISTINCT ds FROM test_optimize_metadata_queries WHERE ds > '2020-10-04'",
-                    anyTree(filter("ds > '2020-10-04'", anyTree(values(
+                    anyTree(values(
                             ImmutableList.of("ds"),
                             ImmutableList.of(
-                                    ImmutableList.of(new StringLiteral("2020-10-01")),
-                                    ImmutableList.of(new StringLiteral("2020-10-02")),
-                                    ImmutableList.of(new StringLiteral("2020-10-03")),
-                                    ImmutableList.of(new StringLiteral("2020-10-04")),
                                     ImmutableList.of(new StringLiteral("2020-10-05")),
                                     ImmutableList.of(new StringLiteral("2020-10-06")),
-                                    ImmutableList.of(new StringLiteral("2020-10-07"))))))));
+                                    ImmutableList.of(new StringLiteral("2020-10-07"))))));
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT DISTINCT ds FROM test_optimize_metadata_queries WHERE ds = '2020-10-04' AND orderkey > 200",
@@ -405,16 +410,12 @@ public class TestHiveLogicalPlanner
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT DISTINCT ds FROM test_optimize_metadata_queries_multiple_partition_columns WHERE ds > '2020-10-04'",
-                    anyTree(filter("ds > '2020-10-04'", anyTree(values(
+                    anyTree(values(
                             ImmutableList.of("ds"),
                             ImmutableList.of(
-                                    ImmutableList.of(new StringLiteral("2020-10-01")),
-                                    ImmutableList.of(new StringLiteral("2020-10-02")),
-                                    ImmutableList.of(new StringLiteral("2020-10-03")),
-                                    ImmutableList.of(new StringLiteral("2020-10-04")),
                                     ImmutableList.of(new StringLiteral("2020-10-05")),
                                     ImmutableList.of(new StringLiteral("2020-10-06")),
-                                    ImmutableList.of(new StringLiteral("2020-10-07"))))))));
+                                    ImmutableList.of(new StringLiteral("2020-10-07"))))));
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT DISTINCT ds FROM test_optimize_metadata_queries_multiple_partition_columns WHERE ds = '2020-10-04' AND orderkey > 200",
@@ -426,29 +427,30 @@ public class TestHiveLogicalPlanner
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT ds, MAX(value) FROM test_optimize_metadata_queries_multiple_partition_columns WHERE ds > '2020-10-04' GROUP BY ds",
-                    anyTree(filter("ds > '2020-10-04'", anyTree(values(
+                    anyTree(values(
                             ImmutableList.of("ds", "value"),
                             ImmutableList.of(
-                                    ImmutableList.of(new StringLiteral("2020-10-01"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-02"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-03"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-04"), new LongLiteral("1")),
                                     ImmutableList.of(new StringLiteral("2020-10-05"), new LongLiteral("1")),
                                     ImmutableList.of(new StringLiteral("2020-10-06"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-07"), new LongLiteral("1"))))))));
+                                    ImmutableList.of(new StringLiteral("2020-10-07"), new LongLiteral("1"))))));
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT MAX(ds), MAX(value) FROM test_optimize_metadata_queries_multiple_partition_columns WHERE ds > '2020-10-04'",
-                    anyTree(filter("ds > '2020-10-04'", anyTree(values(
-                            ImmutableList.of("ds", "value"),
-                            ImmutableList.of(
-                                    ImmutableList.of(new StringLiteral("2020-10-01"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-02"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-03"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-04"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-05"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-06"), new LongLiteral("1")),
-                                    ImmutableList.of(new StringLiteral("2020-10-07"), new LongLiteral("1"))))))));
+                    anyTree(
+                            project(
+                                    ImmutableMap.of(
+                                            "max", expression("'2020-10-07'"),
+                                            "max_2", expression("1")),
+                                    any(values()))));
+            assertPlan(
+                    optimizeMetadataQueries,
+                    "SELECT MAX(value), MAX(ds) FROM test_optimize_metadata_queries_multiple_partition_columns WHERE ds > '2020-10-04'",
+                    anyTree(
+                            project(
+                                    ImmutableMap.of(
+                                            "max", expression("1"),
+                                            "max_2", expression("'2020-10-07'")),
+                                    any(values()))));
         }
         finally {
             queryRunner.execute("DROP TABLE IF EXISTS test_optimize_metadata_queries");
@@ -543,6 +545,9 @@ public class TestHiveLogicalPlanner
         Session optimizeMetadataQueries = Session.builder(this.getQueryRunner().getDefaultSession())
                 .setSystemProperty(OPTIMIZE_METADATA_QUERIES, Boolean.toString(true))
                 .build();
+        Session optimizeMetadataQueriesIgnoreStats = Session.builder(this.getQueryRunner().getDefaultSession())
+                .setSystemProperty(OPTIMIZE_METADATA_QUERIES_IGNORE_STATS, Boolean.toString(true))
+                .build();
         Session shufflePartitionColumns = Session.builder(this.getQueryRunner().getDefaultSession())
                 .setCatalogSessionProperty(HIVE_CATALOG, SHUFFLE_PARTITIONED_COLUMNS_FOR_TABLE_WRITE, Boolean.toString(true))
                 .build();
@@ -552,7 +557,7 @@ public class TestHiveLogicalPlanner
                 "CREATE TABLE test_metadata_aggregation_folding_with_empty_partitions WITH (partitioned_by = ARRAY['ds']) AS " +
                         "SELECT orderkey, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds FROM orders WHERE orderkey < 1000");
         ExtendedHiveMetastore metastore = replicateHiveMetastore((DistributedQueryRunner) queryRunner);
-        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty());
+        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
         Table table = metastore.getTable(metastoreContext, getSession().getSchema().get(), "test_metadata_aggregation_folding_with_empty_partitions").get();
 
         // Add one partition with no statistics.
@@ -585,6 +590,16 @@ public class TestHiveLogicalPlanner
                                     PlanMatchPattern.tableScan("test_metadata_aggregation_folding_with_empty_partitions")),
                             anyTree(
                                     PlanMatchPattern.tableScan("test_metadata_aggregation_folding_with_empty_partitions"))));
+            // Ignore metastore stats. Enable rewrite.
+            assertPlan(
+                    optimizeMetadataQueriesIgnoreStats,
+                    "SELECT * FROM test_metadata_aggregation_folding_with_empty_partitions WHERE ds = (SELECT max(ds) from test_metadata_aggregation_folding_with_empty_partitions)",
+                    anyTree(
+                            join(
+                                    INNER,
+                                    ImmutableList.of(),
+                                    tableScan("test_metadata_aggregation_folding_with_empty_partitions", getSingleValueColumnDomain("ds", "2020-07-20"), TRUE_CONSTANT, ImmutableSet.of("ds")),
+                                    anyTree(any()))));
             // Max ds matching the filter has stats. Enable rewrite.
             assertPlan(
                     optimizeMetadataQueries,
@@ -635,6 +650,16 @@ public class TestHiveLogicalPlanner
                     optimizeMetadataQueries,
                     "SELECT MIN(ds), MAX(ds) FROM test_metadata_aggregation_folding_with_empty_partitions WHERE ds BETWEEN '2020-06-30' AND '2020-07-03'",
                     anyTree(tableScanWithConstraint("test_metadata_aggregation_folding_with_empty_partitions", ImmutableMap.of("ds", multipleValues(VARCHAR, utf8Slices("2020-06-30", "2020-07-01", "2020-07-02"))))));
+            // Ignore metadata stats. Always enable rewrite.
+            assertPlan(
+                    optimizeMetadataQueriesIgnoreStats,
+                    "SELECT MIN(ds), MAX(ds) FROM test_metadata_aggregation_folding_with_empty_partitions WHERE ds BETWEEN '2020-06-30' AND '2020-07-03'",
+                    anyTree(
+                            project(
+                                    ImmutableMap.of(
+                                            "min", expression("'2020-06-30'"),
+                                            "max", expression("'2020-07-02'")),
+                                    anyTree(values()))));
             // Both resulting partitions have stats. Enable rewrite.
             assertPlan(
                     optimizeMetadataQueries,
@@ -669,7 +694,7 @@ public class TestHiveLogicalPlanner
                         "SELECT orderkey, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds, IF(orderkey % 2 = 1, 'A', 'B') status " +
                         "FROM orders WHERE orderkey < 1000");
         ExtendedHiveMetastore metastore = replicateHiveMetastore((DistributedQueryRunner) queryRunner);
-        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty());
+        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
         Table table = metastore.getTable(metastoreContext, getSession().getSchema().get(), "test_metadata_aggregation_folding_with_two_partitions_columns").get();
 
         // Add one partition with no statistics.
@@ -746,7 +771,7 @@ public class TestHiveLogicalPlanner
                         "SELECT orderkey, ARRAY[orderstatus] AS orderstatus, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds FROM orders WHERE orderkey < 1000");
 
         try {
-            // There is a filter on non-partition column. Enable the rewrite even if it can fully pushed down to the connector.
+            // There is a filter on non-partition column which can be pushed down to the connector. Disable the rewrite.
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT max(ds) from test_metadata_aggregation_folding_with_filters WHERE contains(orderstatus, 'F')",
@@ -1328,8 +1353,8 @@ public class TestHiveLogicalPlanner
 
             assertPlan(getSession(), viewQuery, anyTree(
                     filter("orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(table,
-                            ImmutableMap.of("ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02"))),
-                            ImmutableMap.of("orderkey", "orderkey"))),
+                                    ImmutableMap.of("ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02"))),
+                                    ImmutableMap.of("orderkey", "orderkey"))),
                     filter("orderkey_17 < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("orderkey_17", "orderkey")))));
         }
         finally {
@@ -1370,8 +1395,8 @@ public class TestHiveLogicalPlanner
 
             assertPlan(getSession(), viewQuery, anyTree(
                     filter("orderkey < BIGINT'100'", PlanMatchPattern.constrainedTableScan(table,
-                            ImmutableMap.of("ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02"))),
-                            ImmutableMap.of("orderkey", "orderkey"))),
+                                    ImmutableMap.of("ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02"))),
+                                    ImmutableMap.of("orderkey", "orderkey"))),
                     filter("orderkey_62 < BIGINT'100'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("orderkey_62", "orderkey")))));
         }
         finally {
@@ -1406,7 +1431,8 @@ public class TestHiveLogicalPlanner
             assertEquals(viewTable, baseTable);
 
             assertPlan(getSession(), viewQuery, anyTree(
-                    filter("orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("orderkey", "orderkey")))));
+                    anyTree(values("orderkey")), // Alias for the filter column
+                    anyTree(filter("orderkey_17 < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("orderkey_17", "orderkey"))))));
         }
         finally {
             queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
@@ -1448,6 +1474,85 @@ public class TestHiveLogicalPlanner
     }
 
     @Test
+    public void testMaterializedTooManyMissingPartitions()
+    {
+        String table = "orders_partitioned_not_materialized";
+        String view = "orders_partitioned_view_not_materialized";
+
+        QueryRunner queryRunner = getQueryRunner();
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, orderpriority, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-01-02' as ds FROM orders WHERE orderkey >= 1000 and orderkey < 2000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-02-02' as ds FROM orders WHERE orderkey >= 2000 and orderkey < 3000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-03-02' as ds FROM orders WHERE orderkey >= 3000 and orderkey < 4000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-04-02' as ds FROM orders WHERE orderkey >= 4000 and orderkey < 5000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-05-02' as ds FROM orders WHERE orderkey >= 5000 and orderkey < 6000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-06-02' as ds FROM orders WHERE orderkey >= 6000 and orderkey < 7000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-07-02' as ds FROM orders WHERE orderkey >= 7000 and orderkey < 8000 ", table));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                    "AS SELECT orderkey, orderpriority, ds FROM %s", view, table));
+            assertTrue(getQueryRunner().tableExists(getQueryRunner().getDefaultSession(), view));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds = '2020-01-01'", view), 255);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds = '2019-01-02'", view), 248);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds = '2019-02-02'", view), 248);
+
+            String viewQuery = format("SELECT orderkey from %s where orderkey < 10000 ORDER BY orderkey", view);
+            String baseQuery = format("SELECT orderkey from %s where orderkey < 10000 ORDER BY orderkey", table);
+
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+
+            // assert that when missing partition count > threshold, fallback to using base table to satisfy view query
+            Session session = Session.builder(getQueryRunner().getDefaultSession())
+                    .setCatalogSessionProperty(HIVE_CATALOG, MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD, Integer.toString(2))
+                    .build();
+
+            assertPlan(session, viewQuery, anyTree(
+                    filter("orderkey < BIGINT'10000'",
+                            PlanMatchPattern.constrainedTableScan(table, ImmutableMap.of(), ImmutableMap.of("orderkey", "orderkey")))));
+
+            // assert that when count of missing partition  <= threshold, use available partitions from view
+            session = Session.builder(getQueryRunner().getDefaultSession())
+                    .setCatalogSessionProperty(HIVE_CATALOG, MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD, Integer.toString(100))
+                    .build();
+
+            assertPlan(session, viewQuery, anyTree(
+                    filter("orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(table,
+                        ImmutableMap.of("ds", multipleValues(createVarcharType(10), utf8Slices("2019-03-02", "2019-04-02", "2019-05-02", "2019-06-02", "2019-07-02"))),
+                        ImmutableMap.of("orderkey", "orderkey"))),
+                    filter("orderkey_17 < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view,
+                        ImmutableMap.of("ds", multipleValues(createVarcharType(10), utf8Slices("2020-01-01", "2019-01-02", "2019-02-02"))),
+                        ImmutableMap.of("orderkey_17", "orderkey")))));
+
+            // if there are too many missing partitions, the optimization rewrite should not happen
+            session = Session.builder(getQueryRunner().getDefaultSession())
+                    .setSystemProperty(QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED, "true")
+                    .setCatalogSessionProperty(HIVE_CATALOG, MATERIALIZED_VIEW_MISSING_PARTITIONS_THRESHOLD, Integer.toString(2))
+                    .build();
+            setReferencedMaterializedViews((DistributedQueryRunner) queryRunner, table, ImmutableList.of(view));
+
+            assertPlan(session, baseQuery, anyTree(
+                    filter("orderkey < BIGINT'10000'",
+                            PlanMatchPattern.constrainedTableScan(table, ImmutableMap.of(), ImmutableMap.of("orderkey", "orderkey")))));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
     public void testMaterializedViewOptimizationWithNullPartition()
     {
         QueryRunner queryRunner = getQueryRunner();
@@ -1476,8 +1581,8 @@ public class TestHiveLogicalPlanner
 
             assertPlan(getSession(), viewQuery, anyTree(
                     filter("orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(table,
-                            ImmutableMap.of("ds", create(ValueSet.of(createVarcharType(10), utf8Slice("2019-01-02")), true)),
-                            ImmutableMap.of("orderkey", "orderkey"))),
+                                    ImmutableMap.of("ds", create(ValueSet.of(createVarcharType(10), utf8Slice("2019-01-02")), true)),
+                                    ImmutableMap.of("orderkey", "orderkey"))),
                     filter("orderkey_17 < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("orderkey_17", "orderkey")))));
         }
         finally {
@@ -1515,10 +1620,10 @@ public class TestHiveLogicalPlanner
 
             assertPlan(getSession(), viewQuery, anyTree(
                     filter("orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(table,
-                            ImmutableMap.of(
-                                    "ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02")),
-                                    "orderpriority", multipleValues(createVarcharType(15), utf8Slices("1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"))),
-                            ImmutableMap.of("orderkey", "orderkey"))),
+                                    ImmutableMap.of(
+                                            "ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02")),
+                                            "orderpriority", multipleValues(createVarcharType(15), utf8Slices("1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"))),
+                                    ImmutableMap.of("orderkey", "orderkey"))),
                     filter("orderkey_17 < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("orderkey_17", "orderkey")))));
         }
         finally {
@@ -1528,18 +1633,71 @@ public class TestHiveLogicalPlanner
     }
 
     @Test
+    public void testMaterializedViewForIntersect()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table1 = "test_customer_intersect1";
+        String table2 = "test_customer_intersect2";
+        String view = "test_customer_view_intersect";
+        try {
+            computeActual(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS SELECT custkey, name, address, nationkey FROM customer", table1));
+
+            computeActual(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS SELECT custkey, name, address, nationkey FROM customer", table2));
+
+            String baseQuery = format(
+                    "SELECT name, custkey, nationkey FROM ( SELECT name, custkey, nationkey FROM %s WHERE custkey < 1000 INTERSECT " +
+                            "SELECT name, custkey, nationkey FROM %s WHERE custkey <= 900 )", table1, table2);
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS %s", view, baseQuery));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE nationkey < 10", view), 380);
+
+            String viewQuery = format("SELECT name, custkey, nationkey from %s ORDER BY name", view);
+            baseQuery = format("%s ORDER BY name", baseQuery);
+
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+
+            assertPlan(getSession(), viewQuery, anyTree(
+                    anyTree(
+                            anyTree(
+                                    filter("custkey < BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table1,
+                                    ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
+                                    ImmutableMap.of("custkey", "custkey")))),
+                            anyTree(
+                                    filter("custkey_21 <= BIGINT'900'", PlanMatchPattern.constrainedTableScan(table2,
+                                    ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
+                                    ImmutableMap.of("custkey_21", "custkey"))))),
+                    PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of())));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
     public void testMaterializedViewForUnionAll()
     {
         QueryRunner queryRunner = getQueryRunner();
-        String table = "test_customer_union";
+        String table1 = "test_customer_union1";
+        String table2 = "test_customer_union2";
         String view = "test_customer_view_union";
         try {
             computeActual(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey']) " +
-                    "AS SELECT custkey, name, address, nationkey FROM customer", table));
+                    "AS SELECT custkey, name, address, nationkey FROM customer", table1));
+
+            computeActual(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS SELECT custkey, name, address, nationkey FROM customer", table2));
 
             String baseQuery = format(
                     "SELECT name, custkey, nationkey FROM ( SELECT name, custkey, nationkey FROM %s WHERE custkey < 1000 UNION ALL " +
-                            "SELECT name, custkey, nationkey FROM %s WHERE custkey >= 1000 )", table, table);
+                            "SELECT name, custkey, nationkey FROM %s WHERE custkey >= 1000 )", table1, table2);
 
             assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['nationkey']) " +
                     "AS %s", view, baseQuery));
@@ -1554,17 +1712,153 @@ public class TestHiveLogicalPlanner
             assertEquals(viewTable, baseTable);
 
             assertPlan(getSession(), viewQuery, anyTree(
-                    filter("custkey < BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table,
-                            ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
-                            ImmutableMap.of("custkey", "custkey"))),
-                    filter("custkey_21 >= BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table,
+                    filter("custkey < BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table1,
+                                    ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
+                                    ImmutableMap.of("custkey", "custkey"))),
+                    filter("custkey_21 >= BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table2,
                             ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
                             ImmutableMap.of("custkey_21", "custkey"))),
                     PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of())));
         }
         finally {
             queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
-            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewForUnionAllWithOneSideMaterialized()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table1 = "orders_key_partitioned_1";
+        String table2 = "orders_key_partitioned_2";
+        String view = "orders_key_view_union";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, '2020-01-01' as ds FROM orders WHERE orderkey < 1000", table1));
+
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, '2019-01-02' as ds FROM orders WHERE orderkey > 1000 and orderkey < 2000", table2));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, ds FROM %s UNION ALL SELECT orderkey, ds FROM %s", view, table1, table2));
+
+            assertTrue(queryRunner.tableExists(getSession(), view));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view), 510);
+
+            String viewQuery = format("SELECT orderkey, ds FROM %s ORDER BY orderkey", view);
+            String baseQuery = format("(SELECT orderkey, ds FROM %s UNION ALL SELECT orderkey, ds FROM %s) ORDER BY orderkey", table1, table2);
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+
+            assertPlan(getSession(), viewQuery, anyTree(PlanMatchPattern.values("ds", "orderkey"), anyTree(
+                    PlanMatchPattern.constrainedTableScan(table2,
+                            ImmutableMap.of("ds", multipleValues(createVarcharType(10), utf8Slices("2019-01-02")))),
+                    PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of()))));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewForExcept()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table1 = "test_customer_except1";
+        String table2 = "test_customer_except2";
+        String view = "test_customer_view_except";
+        try {
+            computeActual(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS SELECT custkey, name, address, nationkey FROM customer", table1));
+
+            computeActual(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS SELECT custkey, name, address, nationkey FROM customer", table2));
+
+            String baseQuery = format(
+                    "SELECT name, custkey, nationkey FROM %s WHERE custkey < 1000 EXCEPT " +
+                            "SELECT name, custkey, nationkey FROM %s WHERE custkey > 900", table1, table2);
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS %s", view, baseQuery));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE nationkey < 10", view), 380);
+
+            String viewQuery = format("SELECT name, custkey, nationkey from %s ORDER BY name", view);
+            baseQuery = format("%s ORDER BY name", baseQuery);
+
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+
+            assertPlan(getSession(), viewQuery, anyTree(
+                    anyTree(
+                            anyTree(
+                                    filter("custkey < BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table1,
+                                    ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
+                                    ImmutableMap.of("custkey", "custkey")))),
+                            anyTree(
+                                    filter("custkey_21 > BIGINT'900'", PlanMatchPattern.constrainedTableScan(table2,
+                                    ImmutableMap.of("nationkey", multipleValues(BIGINT, ImmutableList.of(10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L, 21L, 22L, 23L, 24L))),
+                                    ImmutableMap.of("custkey_21", "custkey"))))),
+                    PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of())));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewForUnionAllWithMultipleTables()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table1 = "orders_key_small_union";
+        String table2 = "orders_key_large_union";
+        String view = "orders_view_union";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, '2019-01-02' as ds FROM orders WHERE orderkey > 1000 and orderkey < 2000", table1));
+
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, '2020-01-01' as ds FROM orders WHERE orderkey > 2000 and orderkey < 3000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, '2019-01-02' as ds FROM orders WHERE orderkey > 3000 and orderkey < 4000", table2));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey AS view_orderkey, ds FROM ( " +
+                    "SELECT orderkey, ds FROM %s " +
+                    "UNION ALL " +
+                    "SELECT orderkey, ds FROM %s ) ", view, table1, table2));
+
+            assertTrue(queryRunner.tableExists(getSession(), view));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view), 503);
+
+            String viewQuery = format("SELECT view_orderkey, ds from %s where view_orderkey <  10000 ORDER BY view_orderkey", view);
+            String baseQuery = format("SELECT orderkey AS view_orderkey, ds FROM ( " +
+                    "SELECT orderkey, ds FROM %s " +
+                    "UNION ALL " +
+                    "SELECT orderkey, ds FROM %s ) " +
+                    "WHERE orderkey < 10000 ORDER BY orderkey", table1, table2);
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+        }
+        finally {
+            queryRunner.execute("DROP TABLE IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
         }
     }
 
@@ -1697,6 +1991,79 @@ public class TestHiveLogicalPlanner
     }
 
     @Test
+    public void testMaterializedViewSampledRelations()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String viewFull = "view_nation_sampled_100";
+        String viewHalf = "view_nation_sampled_50";
+        String table = "nation_partitioned";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey', 'regionkey']) AS " +
+                    "SELECT name, nationkey, regionkey FROM nation", table));
+
+            String viewFullDefinition = format("SELECT SUM(regionkey) AS sum_region_key, nationkey FROM %s TABLESAMPLE BERNOULLI (100) GROUP BY nationkey", table);
+            String viewHalfDefinition = format("SELECT SUM(regionkey) AS sum_region_key, nationkey FROM %s TABLESAMPLE BERNOULLI (50) GROUP BY nationkey", table);
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS %s", viewFull, viewFullDefinition));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['nationkey']) " +
+                    "AS %s", viewHalf, viewHalfDefinition));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE nationKey < 5", viewFull), 5);
+            queryRunner.execute(format("REFRESH MATERIALIZED VIEW %s WHERE nationKey < 5", viewHalf));
+
+            String viewFullQuery = format("SELECT * from %s ORDER BY nationkey", viewFull);
+            String baseQuery = format("%s ORDER BY nationkey", viewFullDefinition);
+
+            MaterializedResult viewFullTable = computeActual(viewFullQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewFullTable, baseTable);
+
+            // With over 25 nations with multiple regions, it is very high probability that even with millions of runs, we never get the same result
+            // from sampled table and full table
+            String viewHalfQuery = format("SELECT * from %s ORDER BY nationkey", viewHalf);
+            MaterializedResult viewHalfTable = computeActual(viewHalfQuery);
+            assertFalse(viewFullTable.equals(viewHalfTable));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + viewFull);
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + viewHalf);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewWithValues()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String view = "view_nation_values";
+        String table = "nation_partitioned";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['nationkey', 'regionkey']) AS " +
+                    "SELECT name, nationkey, regionkey FROM nation", table));
+
+            String viewDefinition = format("SELECT name, nationkey, regionkey FROM %s JOIN (VALUES 1, 2, 3) t(a) ON t.a = %s.regionkey", table, table);
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['nationkey', 'regionkey']) " +
+                            "AS  %s", view, viewDefinition));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE regionkey = 1", view), 5);
+
+            String viewQuery = format("SELECT name, nationkey, regionkey from %s ORDER BY name", view);
+            String baseQuery = format("%s ORDER BY name", viewDefinition, table);
+
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
     public void testMaterializedViewOptimizationWithDerivedFields()
     {
         QueryRunner queryRunner = getQueryRunner();
@@ -1726,10 +2093,10 @@ public class TestHiveLogicalPlanner
             assertEquals(viewTable, baseTable);
 
             assertPlan(getSession(), viewQuery, anyTree(
-                    anyTree(PlanMatchPattern.constrainedTableScan(table, ImmutableMap.of(
-                            "shipmode", multipleValues(createVarcharType(10), utf8Slices("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK")),
-                            "ds", singleValue(createVarcharType(10), utf8Slice("2020-01-02"))))),
-                    anyTree(PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of()))));
+                            anyTree(PlanMatchPattern.constrainedTableScan(table, ImmutableMap.of(
+                                    "shipmode", multipleValues(createVarcharType(10), utf8Slices("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK")),
+                                    "ds", singleValue(createVarcharType(10), utf8Slice("2020-01-02"))))),
+                            anyTree(PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of()))));
         }
         finally {
             queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
@@ -1789,9 +2156,9 @@ public class TestHiveLogicalPlanner
         try {
             queryRunner.execute(format(
                     "CREATE TABLE %s WITH (partitioned_by = ARRAY['ds', 'shipmode']) AS " +
-                            "SELECT discount, extendedprice, '2020-01-01' as ds, shipmode FROM lineitem WHERE orderkey < 1000 " +
-                            "UNION ALL " +
-                            "SELECT discount, extendedprice, '2020-01-02' as ds, shipmode FROM lineitem WHERE orderkey > 1000",
+                    "SELECT discount, extendedprice, '2020-01-01' as ds, shipmode FROM lineitem WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT discount, extendedprice, '2020-01-02' as ds, shipmode FROM lineitem WHERE orderkey > 1000",
                     table));
             assertUpdate(format(
                     "CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['mvds', 'shipmode']) AS " +
@@ -1799,8 +2166,7 @@ public class TestHiveLogicalPlanner
                             "ds as mvds, shipmode FROM %s group by ds, shipmode",
                     view, table));
             assertTrue(getQueryRunner().tableExists(getSession(), view));
-            ExtendedHiveMetastore metastore = replicateHiveMetastore((DistributedQueryRunner) queryRunner);
-            appendTableParameter(metastore, table, REFERENCED_MATERIALIZED_VIEWS, format("%s.%s", getSession().getSchema().orElse(""), view));
+            setReferencedMaterializedViews((DistributedQueryRunner) queryRunner, table, ImmutableList.of(view));
             assertUpdate(format("REFRESH MATERIALIZED VIEW %s where mvds='2020-01-01'", view), 7);
             String baseQuery = format(
                     "SELECT sum(discount * extendedprice) as _discount_multi_extendedprice_ , MAX(discount*extendedprice) as _max_discount_multi_extendedprice_ , " +
@@ -1823,6 +2189,123 @@ public class TestHiveLogicalPlanner
                             "shipmode", multipleValues(createVarcharType(10), utf8Slices("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK")),
                             "ds", singleValue(createVarcharType(10), utf8Slice("2020-01-02"))))),
                     anyTree(PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of()))));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testBaseToViewConversionWithMultipleCandidates()
+    {
+        Session queryOptimizationWithMaterializedView = Session.builder(getSession())
+                .setSystemProperty(QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED, "true")
+                .build();
+        QueryRunner queryRunner = getQueryRunner();
+        String table = "orders_partitioned";
+        String view1 = "test_orders_view1";
+        String view2 = "test_orders_view2";
+        String view3 = "test_orders_view3";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, orderpriority, orderdate, totalprice, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, orderdate, totalprice, '2020-01-02' as ds FROM orders WHERE orderkey > 1000", table));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                    "AS SELECT orderkey, orderpriority, ds FROM %s", view1, table));
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                    "AS SELECT orderkey, orderdate, ds FROM %s", view2, table));
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                    "AS SELECT orderkey, totalprice, ds FROM %s", view3, table));
+
+            assertTrue(queryRunner.tableExists(getSession(), view1));
+            assertTrue(queryRunner.tableExists(getSession(), view2));
+            assertTrue(queryRunner.tableExists(getSession(), view3));
+
+            setReferencedMaterializedViews((DistributedQueryRunner) queryRunner, table, ImmutableList.of(view1, view2, view3));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view1), 255);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-02'", view1), 14745);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view2), 255);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-02'", view2), 14745);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view3), 255);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-02'", view3), 14745);
+
+            String baseQuery = format("SELECT orderkey, orderdate from %s where orderkey < 1000 ORDER BY orderkey", table);
+            String viewQuery = format("SELECT orderkey, orderdate from %s where orderkey < 1000 ORDER BY orderkey", view2);
+
+            // Try optimizing the base query when there is one compatible candidate from the referenced materialized views
+            MaterializedResult optimizedQueryResult = computeActual(queryOptimizationWithMaterializedView, baseQuery);
+            MaterializedResult baseQueryResult = computeActual(baseQuery);
+            assertEquals(optimizedQueryResult, baseQueryResult);
+
+            PlanMatchPattern expectedPattern = anyTree(
+                    anyTree(values("orderkey", "orderdate")),
+                    anyTree(filter("orderkey_25 < BIGINT'1000'", PlanMatchPattern.constrainedTableScan(view2,
+                            ImmutableMap.of(),
+                            ImmutableMap.of("orderkey_25", "orderkey")))));
+
+            assertPlan(queryOptimizationWithMaterializedView, baseQuery, expectedPattern);
+            assertPlan(getSession(), viewQuery, expectedPattern);
+
+            // Try optimizing the base query when all candidates are incompatible
+            setReferencedMaterializedViews((DistributedQueryRunner) queryRunner, table, ImmutableList.of(view1, view3));
+            assertPlan(queryOptimizationWithMaterializedView, baseQuery, anyTree(
+                    filter("orderkey < BIGINT'1000'", PlanMatchPattern.constrainedTableScan(table,
+                            ImmutableMap.of(),
+                            ImmutableMap.of("orderkey", "orderkey")))));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view1);
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view2);
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view3);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testBaseToViewConversionWithGroupBy()
+    {
+        Session queryOptimizationWithMaterializedView = Session.builder(getSession())
+                .setSystemProperty(QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED, "true")
+                .build();
+        QueryRunner queryRunner = getQueryRunner();
+        String table = "lineitem_partitioned_derived_fields";
+        String view = "lineitem_partitioned_view_derived_fields";
+        try {
+            queryRunner.execute(format(
+                    "CREATE TABLE %s WITH (partitioned_by = ARRAY['ds', 'shipmode']) AS " +
+                            "SELECT discount, extendedprice, '2020-01-01' as ds, shipmode FROM lineitem WHERE orderkey < 1000 " +
+                            "UNION ALL " +
+                            "SELECT discount, extendedprice, '2020-01-02' as ds, shipmode FROM lineitem WHERE orderkey > 1000",
+                    table));
+            assertUpdate(format(
+                    "CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds', 'shipmode']) AS " +
+                            "SELECT SUM(discount * extendedprice) as _discount_multi_extendedprice_ , MAX(discount*extendedprice) as _max_discount_multi_extendedprice_ , " +
+                            "ds, shipmode FROM %s group by ds, shipmode",
+                    view, table));
+            assertTrue(getQueryRunner().tableExists(getSession(), view));
+
+            setReferencedMaterializedViews((DistributedQueryRunner) queryRunner, table, ImmutableList.of(view));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s where ds='2020-01-01'", view), 7);
+            String baseQuery = format(
+                    "SELECT SUM(discount * extendedprice) as _discount_multi_extendedprice_, MAX(discount*extendedprice) as _max_discount_multi_extendedprice_ FROM %s", table);
+            String viewQuery = format(
+                    "SELECT SUM(_discount_multi_extendedprice_), MAX(_max_discount_multi_extendedprice_) FROM %s", view);
+            MaterializedResult optimizedQueryResult = computeActual(queryOptimizationWithMaterializedView, baseQuery);
+            MaterializedResult baseQueryResult = computeActual(baseQuery);
+            assertEquals(optimizedQueryResult, baseQueryResult);
+
+            PlanMatchPattern expectedPattern = anyTree(
+                    anyTree(PlanMatchPattern.constrainedTableScan(table, ImmutableMap.of(
+                            "shipmode", multipleValues(createVarcharType(10), utf8Slices("AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK")),
+                            "ds", singleValue(createVarcharType(10), utf8Slice("2020-01-02"))))),
+                    anyTree(PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of())));
+            assertPlan(getSession(), viewQuery, expectedPattern);
+            assertPlan(queryOptimizationWithMaterializedView, baseQuery, expectedPattern);
         }
         finally {
             queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
@@ -1868,8 +2351,7 @@ public class TestHiveLogicalPlanner
         }
     }
 
-    //TODO: Populate columnMappings to cover all joined base tables, https://github.com/prestodb/presto/issues/16220
-    @Test(enabled = false)
+    @Test
     public void testMaterializedViewForJoin()
     {
         QueryRunner queryRunner = getQueryRunner();
@@ -1880,22 +2362,28 @@ public class TestHiveLogicalPlanner
             queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
                     "SELECT orderkey, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
                     "UNION ALL " +
-                    "SELECT orderkey, '2019-01-02' as ds FROM orders WHERE orderkey > 1000", table1));
+                    "SELECT orderkey, '2019-01-02' as ds FROM orders WHERE orderkey > 1000 and orderkey < 2000", table1));
 
             queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
-                    "SELECT totalprice, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "SELECT orderkey, totalprice, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
                     "UNION ALL " +
-                    "SELECT totalprice, '2019-01-02' as ds FROM orders WHERE orderkey > 1000", table2));
+                    "SELECT orderkey, totalprice, '2019-01-02' as ds FROM orders WHERE orderkey > 1000 and orderkey < 2000", table2));
 
-            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
-                    "AS SELECT t1.orderkey as view_orderkey, t2.totalprice as view_totalprice, t1.ds" +
-                    " FROM %s t1 inner join  %s t2 ON t1.ds=t2.ds", view, table1, table2));
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT t1.orderkey as view_orderkey, t2.totalprice as view_totalprice, t1.ds " +
+                    "FROM %s t1 inner join %s t2 ON (t1.ds=t2.ds AND t1.orderkey = t2.orderkey)", view, table1, table2));
 
             assertTrue(queryRunner.tableExists(getSession(), view));
 
-            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view), 65025);
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE ds='2020-01-01'", view), 255);
 
-            String viewQuery = format("SELECT view_orderkey, view_totalprice from %s where view_orderkey < 10000", view);
+            String viewQuery = format("SELECT view_orderkey, view_totalprice, ds FROM %s WHERE view_orderkey <  10000 ORDER BY view_orderkey", view);
+            String baseQuery = format("SELECT t1.orderkey as view_orderkey, t2.totalprice as view_totalprice, t1.ds " +
+                    "FROM %s t1 inner join  %s t2 ON (t1.ds=t2.ds AND t1.orderkey = t2.orderkey) " +
+                    "WHERE t1.orderkey < 10000 ORDER BY t1.orderkey", table1, table2);
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
             // getExplainPlan(viewQuery, LOGICAL);
         }
         finally {
@@ -1991,6 +2479,83 @@ public class TestHiveLogicalPlanner
     }
 
     @Test
+    public void testMaterializedViewInvalidLeftOuterJoin()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String view = "view_invalid_left_outer_join";
+        String table1 = "t1_invalid_left_outer_join";
+        String table2 = "t2_invalid_left_outer_join";
+
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS SELECT 1 as a, '2020-01-01' as ds", table1));
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS SELECT 1 as a, '2020-01-01' as ds", table2));
+
+            assertQueryFails(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['t1_ds', 't2_ds']) " +
+                            "AS SELECT t1.a as t1_a, t2.a as t2_a, t1.ds as t1_ds, t2.ds as t2_ds FROM %s t1 LEFT JOIN %s t2 ON t1.a = t2.a", view, table1, table2),
+                    ".*must have at least one common partition equality constraint.*");
+
+            assertQueryFails(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['t2_ds']) " +
+                            "AS SELECT t1.a as t1_a, t2.a as t2_a, t2.ds as t2_ds FROM %s t1 LEFT JOIN %s t2 ON t1.ds = t2.ds", view, table1, table2),
+                    ".*must have at least one partition column that exists in.*");
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewForLeftOuterJoin()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table1 = "orders_key_partitioned_left_outer_join";
+        String table2 = "orders_price_partitioned_left_outer_join";
+        String view = "orders_view_left_outer_join";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, '2019-01-01' as ds FROM orders WHERE orderkey < 1500 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, '2019-01-02' as ds FROM orders WHERE orderkey > 1500 and orderkey < 2000", table1));
+
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, totalprice, '2019-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, totalprice, '2019-01-02' as ds FROM orders WHERE orderkey > 1000 and orderkey < 2000", table2));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['t1_ds', 't2_ds']) AS " +
+                    "SELECT t1.orderkey as view_orderkey, t2.totalprice as view_totalprice, t1.ds as t1_ds, t2.ds as t2_ds " +
+                    "FROM %s t1 left join %s t2 ON (t1.ds=t2.ds AND t1.orderkey = t2.orderkey)", view, table1, table2));
+
+            assertTrue(queryRunner.tableExists(getSession(), view));
+
+            assertUpdate(format("REFRESH MATERIALIZED VIEW %s WHERE t1_ds='2019-01-01'", view), 375);
+
+            String viewQuery = format("SELECT view_orderkey, view_totalprice, t1_ds FROM %s WHERE view_orderkey <  10000 ORDER BY view_orderkey", view);
+            String baseQuery = format("SELECT t1.orderkey as view_orderkey, t2.totalprice as view_totalprice, t1.ds " +
+                    "FROM %s t1 left join  %s t2 ON (t1.ds=t2.ds AND t1.orderkey = t2.orderkey) " +
+                    "WHERE t1.orderkey < 10000 ORDER BY t1.orderkey", table1, table2);
+            MaterializedResult viewTable = computeActual(viewQuery);
+            MaterializedResult baseTable = computeActual(baseQuery);
+            assertEquals(viewTable, baseTable);
+
+            assertPlan(getSession(), viewQuery, anyTree(
+                    join(LEFT, ImmutableList.of(equiJoinClause("ds", "ds_8"), equiJoinClause("orderkey", "orderkey_7")),
+                            anyTree(filter("orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(table1,
+                                    ImmutableMap.of(
+                                            "ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02"))),
+                                    ImmutableMap.of("orderkey", "orderkey", "ds", "ds")))),
+                            anyTree(PlanMatchPattern.constrainedTableScan(table2, ImmutableMap.of("ds", singleValue(createVarcharType(10), utf8Slice("2019-01-02"))), ImmutableMap.of("orderkey_7", "orderkey", "ds_8", "ds")))),
+                    filter("view_orderkey < BIGINT'10000'", PlanMatchPattern.constrainedTableScan(view, ImmutableMap.of(), ImmutableMap.of("view_orderkey", "view_orderkey")))));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
     public void testMaterializedViewFullOuterJoin()
     {
         QueryRunner queryRunner = getQueryRunner();
@@ -2012,7 +2577,93 @@ public class TestHiveLogicalPlanner
                             "AS SELECT t1.orderkey as view_orderkey, t2.totalprice as view_totalprice, " +
                             "t1.ds as ds, t1.orderpriority as view_orderpriority, t2.orderstatus as view_orderstatus " +
                             " FROM %s t1 full outer join %s t2 ON t1.ds=t2.ds", view, table1, table2),
-                    ".*Only inner join is supported for materialized view.*");
+                    ".*Only inner join, left join and cross join unnested are supported for materialized view.*");
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewSameTableTwice()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table = "same_table";
+        String view = "same_table_twice";
+
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS SELECT 1 as a, '2020-01-01' as ds", table));
+
+            assertQueryFails(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                    "AS SELECT t1.a, t1.ds FROM %s t1 UNION ALL SELECT t2.a, t2.ds FROM %s t2", view, table, table), ".*Materialized View definition does not support multiple instances of same table*");
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewSubqueryShapes()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String view1 = "orders_key_view1";
+        String view2 = "orders_key_view2";
+        String view3 = "orders_key_view3";
+        String view4 = "orders_key_view4";
+        String table1 = "orders_key_partitioned_1";
+        String table2 = "orders_key_partitioned_2";
+        String table3 = "orders_key_partitioned_3";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS SELECT 1 as a, '2020-01-01' as ds", table1));
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS SELECT 1 as a, '2020-01-01' as ds", table2));
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS SELECT 1 as a, '2020-01-01' as ds", table3));
+
+            assertQueryFails(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                            "AS SELECT t1.a, t1.ds FROM %s t1 WHERE (t1.a IN (SELECT t2.a FROM %s t2 WHERE t1.ds = t2.ds))", view1, table1, table2),
+                    ".*Subqueries are not supported for materialized view.*");
+
+            assertQueryFails(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                            "AS SELECT t1.a, t1.ds FROM %s t1 join (select t2.ds AS t2_ds, t2.a from %s t2 where (t2.a IN (SELECT t3.a FROM %s t3 WHERE t2.ds = t3.ds))) ON t1.ds = t2_ds", view2, table1, table2, table3),
+                    ".*Subqueries are not supported for materialized view.*");
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                    "AS SELECT t1.a, t1.ds FROM %s t1 join (select t2.ds AS t2_ds, t2.a from %s t2 where t2.a <= 420) ON t1.ds = t2_ds", view3, table1, table2));
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view1);
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view2);
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view3);
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view4);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table3);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewLateralJoin()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String view = "order_view_lateral_join";
+        String table1 = "orders_key_partitioned_lateral_join";
+        String table2 = "orders_price_partitioned_lateral_join";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds', 'orderpriority']) AS " +
+                    "SELECT orderkey, '2020-01-01' as ds, orderpriority FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, '2019-01-02' as ds , orderpriority FROM orders WHERE orderkey > 1000 and orderkey < 2000", table1));
+
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds', 'orderstatus']) AS " +
+                    "SELECT totalprice, '2020-01-01' as ds, orderstatus FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT totalprice, '2019-01-02' as ds, orderstatus FROM orders WHERE orderkey > 1000 and orderkey < 2000", table2));
+
+            assertQueryFails(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) " +
+                            "AS SELECT t1.ds FROM %s t1, LATERAL(SELECT t2.ds, t2.orderstatus AS view_orderstatus, t1.orderpriority AS view_orderpriority FROM %s t2 WHERE t1.ds = t2.ds)", view, table1, table2),
+                    ".*Only inner join, left join and cross join unnested are supported for materialized view.*");
         }
         finally {
             queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
@@ -2056,6 +2707,179 @@ public class TestHiveLogicalPlanner
         finally {
             queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
             queryRunner.execute("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testInsertBySelectingFromMaterializedView()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String table1 = "orders_partitioned_source";
+        String table2 = "orders_partitioned_target";
+        String table3 = "orders_from_mv";
+        String view = "test_orders_view";
+        try {
+            queryRunner.execute(format("CREATE TABLE %s WITH (partitioned_by = ARRAY['ds']) AS " +
+                    "SELECT orderkey, orderpriority, '2020-01-01' as ds FROM orders WHERE orderkey < 1000 " +
+                    "UNION ALL " +
+                    "SELECT orderkey, orderpriority, '2019-01-02' as ds FROM orders WHERE orderkey > 1000", table1));
+            assertTrue(getQueryRunner().tableExists(getSession(), table1));
+
+            assertUpdate(format("CREATE MATERIALIZED VIEW %s WITH (partitioned_by = ARRAY['ds']) AS SELECT orderkey, orderpriority, ds FROM %s", view, table1));
+            assertTrue(getQueryRunner().tableExists(getSession(), view));
+
+            assertUpdate(format("CREATE TABLE %s AS SELECT * FROM %s WHERE 1=0", table2, table1), 0);
+            assertTrue(getQueryRunner().tableExists(getSession(), table2));
+
+            assertQueryFails(format("CREATE TABLE %s AS SELECT * FROM %s", table3, view),
+                    ".*CreateTableAsSelect by selecting from a materialized view \\w+ is not supported.*");
+
+            assertUpdate(format("INSERT INTO %s VALUES(99999, '1-URGENT', '2019-01-02')", table2), 1);
+            assertUpdate(format("INSERT INTO %s SELECT * FROM %s WHERE ds = '2020-01-01'", table2, table1), 255);
+            assertQueryFails(format("INSERT INTO %s SELECT * FROM %s WHERE ds = '2020-01-01'", table2, view),
+                    ".*Insert by selecting from a materialized view \\w+ is not supported.*");
+        }
+        finally {
+            queryRunner.execute("DROP MATERIALIZED VIEW IF EXISTS " + view);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table1);
+            queryRunner.execute("DROP TABLE IF EXISTS " + table2);
+        }
+    }
+
+    @Test
+    public void testMaterializedViewQueryAccessControl()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session invokerSession = Session.builder(getSession())
+                .setIdentity(new Identity("test_view_invoker", Optional.empty()))
+                .setCatalog(getSession().getCatalog().get())
+                .setSchema(getSession().getSchema().get())
+                .setSystemProperty(QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED, "true")
+                .build();
+        Session ownerSession = getSession();
+
+        queryRunner.execute(
+                ownerSession,
+                "CREATE TABLE test_orders_base WITH (partitioned_by = ARRAY['orderstatus']) " +
+                        "AS SELECT orderkey, custkey, totalprice, orderstatus FROM orders LIMIT 10");
+        queryRunner.execute(
+                ownerSession,
+                "CREATE MATERIALIZED VIEW test_orders_view " +
+                        "WITH (partitioned_by = ARRAY['orderstatus']) " +
+                        "AS SELECT SUM(totalprice) AS totalprice, orderstatus FROM test_orders_base GROUP BY orderstatus");
+        setReferencedMaterializedViews((DistributedQueryRunner) getQueryRunner(), "test_orders_base", ImmutableList.of("test_orders_view"));
+
+        Consumer<String> testQueryWithDeniedPrivilege = query -> {
+            // Verify checking the base table instead of the materialized view for SELECT permission
+            assertAccessDenied(
+                    invokerSession,
+                    query,
+                    "Cannot select from columns \\[.*\\] in table .*test_orders_base.*",
+                    privilege(invokerSession.getUser(), "test_orders_base", SELECT_COLUMN));
+            assertAccessAllowed(
+                    invokerSession,
+                    query,
+                    privilege(invokerSession.getUser(), "test_orders_view", SELECT_COLUMN));
+        };
+
+        try {
+            // Check for both the direct materialized view query and the base table query optimization with materialized view
+            String directMaterializedViewQuery = "SELECT totalprice, orderstatus FROM test_orders_view";
+            String queryWithMaterializedViewOptimization = "SELECT SUM(totalprice) AS totalprice, orderstatus FROM test_orders_base GROUP BY orderstatus";
+
+            // Test when the materialized view is not materialized yet
+            testQueryWithDeniedPrivilege.accept(directMaterializedViewQuery);
+            testQueryWithDeniedPrivilege.accept(queryWithMaterializedViewOptimization);
+
+            // Test when the materialized view is partially materialized
+            queryRunner.execute(ownerSession, "REFRESH MATERIALIZED VIEW test_orders_view WHERE orderstatus = 'F'");
+            testQueryWithDeniedPrivilege.accept(directMaterializedViewQuery);
+            testQueryWithDeniedPrivilege.accept(queryWithMaterializedViewOptimization);
+
+            // Test when the materialized view is fully materialized
+            queryRunner.execute(ownerSession, "REFRESH MATERIALIZED VIEW test_orders_view WHERE orderstatus <> 'F'");
+            testQueryWithDeniedPrivilege.accept(directMaterializedViewQuery);
+            testQueryWithDeniedPrivilege.accept(queryWithMaterializedViewOptimization);
+        }
+        finally {
+            queryRunner.execute(ownerSession, "DROP MATERIALIZED VIEW test_orders_view");
+            queryRunner.execute(ownerSession, "DROP TABLE test_orders_base");
+        }
+    }
+
+    @Test
+    public void testRefreshMaterializedViewAccessControl()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session invokerSession = Session.builder(getSession())
+                .setIdentity(new Identity("test_view_invoker", Optional.empty()))
+                .setCatalog(getSession().getCatalog().get())
+                .setSchema(getSession().getSchema().get())
+                .build();
+        Session ownerSession = getSession();
+
+        queryRunner.execute(
+                ownerSession,
+                "CREATE TABLE test_orders_base WITH (partitioned_by = ARRAY['orderstatus']) " +
+                        "AS SELECT orderkey, custkey, totalprice, orderstatus FROM orders LIMIT 10");
+        queryRunner.execute(
+                ownerSession,
+                "CREATE MATERIALIZED VIEW test_orders_view " +
+                        "WITH (partitioned_by = ARRAY['orderstatus']) " +
+                        "AS SELECT orderkey, totalprice, orderstatus FROM test_orders_base");
+
+        String refreshMaterializedView = "REFRESH MATERIALIZED VIEW test_orders_view WHERE orderstatus = 'F'";
+
+        try {
+            // Verify that refresh checks the owner's permission instead of the invoker's permission on the base table
+            assertAccessDenied(
+                    invokerSession,
+                    refreshMaterializedView,
+                    "Cannot select from columns \\[.*\\] in table .*test_orders_base.*",
+                    privilege(ownerSession.getUser(), "test_orders_base", SELECT_COLUMN));
+            assertAccessAllowed(
+                    invokerSession,
+                    refreshMaterializedView,
+                    privilege(invokerSession.getUser(), "test_orders_base", SELECT_COLUMN));
+
+            // Verify that refresh checks owner's permission instead of the invokers permission on the materialized view.
+            // Verify that refresh requires INSERT_TABLE permission instead of SELECT_COLUMN permission on the materialized view.
+            assertAccessDenied(
+                    invokerSession,
+                    refreshMaterializedView,
+                    "Cannot insert into table .*test_orders_view.*",
+                    privilege(ownerSession.getUser(), "test_orders_view", INSERT_TABLE));
+            assertAccessAllowed(
+                    invokerSession,
+                    refreshMaterializedView,
+                    privilege(invokerSession.getUser(), "test_orders_view", INSERT_TABLE));
+            assertAccessAllowed(
+                    invokerSession,
+                    refreshMaterializedView,
+                    privilege(ownerSession.getUser(), "test_orders_view", SELECT_COLUMN));
+            assertAccessAllowed(
+                    invokerSession,
+                    refreshMaterializedView,
+                    privilege(invokerSession.getUser(), "test_orders_view", SELECT_COLUMN));
+
+            // Verify for the owner invoking refresh
+            assertAccessDenied(
+                    ownerSession,
+                    refreshMaterializedView,
+                    "Cannot select from columns \\[.*\\] in table .*test_orders_base.*",
+                    privilege(ownerSession.getUser(), "test_orders_base", SELECT_COLUMN));
+            assertAccessDenied(
+                    ownerSession,
+                    refreshMaterializedView,
+                    "Cannot insert into table .*test_orders_view.*",
+                    privilege(ownerSession.getUser(), "test_orders_view", INSERT_TABLE));
+            assertAccessAllowed(
+                    ownerSession,
+                    refreshMaterializedView);
+        }
+        finally {
+            queryRunner.execute(ownerSession, "DROP MATERIALIZED VIEW test_orders_view");
+            queryRunner.execute(ownerSession, "DROP TABLE test_orders_base");
         }
     }
 
@@ -2669,6 +3493,14 @@ public class TestHiveLogicalPlanner
         assertEquals(requestedColumnsSet, expectedRequestedColumns);
     }
 
+    private void setReferencedMaterializedViews(DistributedQueryRunner queryRunner, String tableName, List<String> referencedMaterializedViews)
+    {
+        appendTableParameter(replicateHiveMetastore(queryRunner),
+                tableName,
+                REFERENCED_MATERIALIZED_VIEWS,
+                referencedMaterializedViews.stream().map(view -> format("%s.%s", getSession().getSchema().orElse(""), view)).collect(joining(",")));
+    }
+
     private ExtendedHiveMetastore replicateHiveMetastore(DistributedQueryRunner queryRunner)
     {
         URI baseDir = queryRunner.getCoordinator().getBaseDataDir().resolve("hive_data").toUri();
@@ -2681,7 +3513,7 @@ public class TestHiveLogicalPlanner
 
     private void appendTableParameter(ExtendedHiveMetastore metastore, String tableName, String parameterKey, String parameterValue)
     {
-        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty());
+        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
         Optional<Table> table = metastore.getTable(metastoreContext, getSession().getSchema().get(), tableName);
         if (table.isPresent()) {
             Table originalTable = table.get();

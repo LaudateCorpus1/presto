@@ -58,6 +58,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.SortedMap;
+import java.util.stream.IntStream;
 
 import static com.facebook.presto.orc.NoopOrcAggregatedMemoryContext.NOOP_ORC_AGGREGATED_MEMORY_CONTEXT;
 import static com.facebook.presto.orc.NoopOrcLocalMemoryContext.NOOP_ORC_LOCAL_MEMORY_CONTEXT;
@@ -72,11 +73,7 @@ import static com.facebook.presto.orc.metadata.OrcMetadataReader.maxStringTrunca
 import static com.facebook.presto.orc.metadata.OrcMetadataReader.minStringTruncateToValidRange;
 import static com.facebook.presto.orc.metadata.PostScript.HiveWriterVersion.ORC_HIVE_8732;
 import static com.facebook.presto.orc.metadata.PostScript.HiveWriterVersion.ORIGINAL;
-import static com.facebook.presto.orc.metadata.statistics.BinaryStatistics.BINARY_VALUE_BYTES_OVERHEAD;
-import static com.facebook.presto.orc.metadata.statistics.BooleanStatistics.BOOLEAN_VALUE_BYTES;
-import static com.facebook.presto.orc.metadata.statistics.DoubleStatistics.DOUBLE_VALUE_BYTES;
-import static com.facebook.presto.orc.metadata.statistics.IntegerStatistics.INTEGER_VALUE_BYTES;
-import static com.facebook.presto.orc.metadata.statistics.StringStatistics.STRING_VALUE_BYTES_OVERHEAD;
+import static com.facebook.presto.orc.metadata.statistics.ColumnStatistics.createColumnStatistics;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.Math.toIntExact;
@@ -241,7 +238,7 @@ public class DwrfMetadataReader
                     // FileStatistics contains ColumnStatistics for the node and all its child nodes (subtree)
                     for (int statsIdx = 0; statsIdx < nodeStats.getStatisticsCount(); statsIdx++) {
                         decryptedFileStats[nodeId + statsIdx] =
-                                toColumnStatistics(hiveWriterVersion, nodeStats.getStatistics(statsIdx), false);
+                                toColumnStatistics(hiveWriterVersion, nodeStats.getStatistics(statsIdx), false, null);
                     }
                 }
                 catch (IOException e) {
@@ -422,14 +419,16 @@ public class DwrfMetadataReader
     }
 
     @Override
-    public List<RowGroupIndex> readRowIndexes(HiveWriterVersion hiveWriterVersion, InputStream inputStream)
+    public List<RowGroupIndex> readRowIndexes(HiveWriterVersion hiveWriterVersion, InputStream inputStream, List<HiveBloomFilter> bloomFilters)
             throws IOException
     {
         long cpuStart = THREAD_MX_BEAN.getCurrentThreadCpuTime();
         CodedInputStream input = CodedInputStream.newInstance(inputStream);
         DwrfProto.RowIndex rowIndex = DwrfProto.RowIndex.parseFrom(input);
         runtimeStats.addMetricValue("DwrfReadRowIndexesTimeNanos", THREAD_MX_BEAN.getCurrentThreadCpuTime() - cpuStart);
-        return ImmutableList.copyOf(Iterables.transform(rowIndex.getEntryList(), rowIndexEntry -> toRowGroupIndex(hiveWriterVersion, rowIndexEntry)));
+        return IntStream.range(0, rowIndex.getEntryCount())
+                .mapToObj(i -> toRowGroupIndex(hiveWriterVersion, rowIndex.getEntry(i), bloomFilters == null || bloomFilters.isEmpty() ? null : bloomFilters.get(i)))
+                .collect(toImmutableList());
     }
 
     @Override
@@ -439,7 +438,7 @@ public class DwrfMetadataReader
         return ImmutableList.of();
     }
 
-    private static RowGroupIndex toRowGroupIndex(HiveWriterVersion hiveWriterVersion, DwrfProto.RowIndexEntry rowIndexEntry)
+    private static RowGroupIndex toRowGroupIndex(HiveWriterVersion hiveWriterVersion, DwrfProto.RowIndexEntry rowIndexEntry, HiveBloomFilter bloomFilter)
     {
         List<Long> positionsList = rowIndexEntry.getPositionsList();
         ImmutableList.Builder<Integer> positions = ImmutableList.builder();
@@ -451,7 +450,7 @@ public class DwrfMetadataReader
 
             positions.add(intPosition);
         }
-        return new RowGroupIndex(positions.build(), toColumnStatistics(hiveWriterVersion, rowIndexEntry.getStatistics(), true));
+        return new RowGroupIndex(positions.build(), toColumnStatistics(hiveWriterVersion, rowIndexEntry.getStatistics(), true, bloomFilter));
     }
 
     private static List<ColumnStatistics> toColumnStatistics(HiveWriterVersion hiveWriterVersion, List<DwrfProto.ColumnStatistics> columnStatistics, boolean isRowGroup)
@@ -459,7 +458,7 @@ public class DwrfMetadataReader
         if (columnStatistics == null) {
             return ImmutableList.of();
         }
-        return ImmutableList.copyOf(Iterables.transform(columnStatistics, statistics -> toColumnStatistics(hiveWriterVersion, statistics, isRowGroup)));
+        return ImmutableList.copyOf(Iterables.transform(columnStatistics, statistics -> toColumnStatistics(hiveWriterVersion, statistics, isRowGroup, null)));
     }
 
     private Map<String, Slice> toUserMetadata(List<DwrfProto.UserMetadataItem> metadataList)
@@ -474,38 +473,10 @@ public class DwrfMetadataReader
         return mapBuilder.build();
     }
 
-    private static ColumnStatistics toColumnStatistics(HiveWriterVersion hiveWriterVersion, DwrfProto.ColumnStatistics statistics, boolean isRowGroup)
+    private static ColumnStatistics toColumnStatistics(HiveWriterVersion hiveWriterVersion, DwrfProto.ColumnStatistics statistics, boolean isRowGroup, HiveBloomFilter bloomFilter)
     {
-        long minAverageValueBytes;
-        if (statistics.hasBucketStatistics()) {
-            minAverageValueBytes = BOOLEAN_VALUE_BYTES;
-        }
-        else if (statistics.hasIntStatistics()) {
-            minAverageValueBytes = INTEGER_VALUE_BYTES;
-        }
-        else if (statistics.hasDoubleStatistics()) {
-            minAverageValueBytes = DOUBLE_VALUE_BYTES;
-        }
-        else if (statistics.hasStringStatistics()) {
-            minAverageValueBytes = STRING_VALUE_BYTES_OVERHEAD;
-            if (statistics.hasNumberOfValues() && statistics.getNumberOfValues() > 0) {
-                minAverageValueBytes += statistics.getStringStatistics().getSum() / statistics.getNumberOfValues();
-            }
-        }
-        else if (statistics.hasBinaryStatistics()) {
-            // offset and value length
-            minAverageValueBytes = BINARY_VALUE_BYTES_OVERHEAD;
-            if (statistics.hasNumberOfValues() && statistics.getNumberOfValues() > 0) {
-                minAverageValueBytes += statistics.getBinaryStatistics().getSum() / statistics.getNumberOfValues();
-            }
-        }
-        else {
-            minAverageValueBytes = 0;
-        }
-
-        return new ColumnStatistics(
+        return createColumnStatistics(
                 statistics.getNumberOfValues(),
-                minAverageValueBytes,
                 statistics.hasBucketStatistics() ? toBooleanStatistics(statistics.getBucketStatistics()) : null,
                 statistics.hasIntStatistics() ? toIntegerStatistics(statistics.getIntStatistics()) : null,
                 statistics.hasDoubleStatistics() ? toDoubleStatistics(statistics.getDoubleStatistics()) : null,
@@ -513,7 +484,7 @@ public class DwrfMetadataReader
                 null,
                 null,
                 statistics.hasBinaryStatistics() ? toBinaryStatistics(statistics.getBinaryStatistics()) : null,
-                null);
+                bloomFilter);
     }
 
     private static BooleanStatistics toBooleanStatistics(DwrfProto.BucketStatistics bucketStatistics)

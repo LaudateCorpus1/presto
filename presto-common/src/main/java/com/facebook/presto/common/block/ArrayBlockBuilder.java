@@ -135,10 +135,24 @@ public class ArrayBlockBuilder
         return 0;
     }
 
+    @Nullable
     @Override
     protected boolean[] getValueIsNull()
     {
-        return valueIsNull;
+        return hasNullValue ? valueIsNull : null;
+    }
+
+    @Override
+    public boolean mayHaveNull()
+    {
+        return hasNullValue;
+    }
+
+    @Override
+    public boolean isNull(int position)
+    {
+        checkReadablePosition(position);
+        return hasNullValue && valueIsNull[position];
     }
 
     @Override
@@ -193,13 +207,24 @@ public class ArrayBlockBuilder
         return this;
     }
 
+    public BlockBuilder getElementBlockBuilder()
+    {
+        return values;
+    }
+
     @Override
-    public SingleArrayBlockWriter beginBlockEntry()
+    public void beginDirectEntry()
     {
         if (currentEntryOpened) {
             throw new IllegalStateException("Expected current entry to be closed but was opened");
         }
         currentEntryOpened = true;
+    }
+
+    @Override
+    public SingleArrayBlockWriter beginBlockEntry()
+    {
+        beginDirectEntry();
         return new SingleArrayBlockWriter(values, values.getPositionCount());
     }
 

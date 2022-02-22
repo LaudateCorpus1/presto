@@ -18,6 +18,7 @@ import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.TypeSignature;
 import com.facebook.presto.cost.StatsAndCosts;
+import com.facebook.presto.execution.QueryInfo;
 import com.facebook.presto.hive.HiveSessionProperties.InsertExistingPartitionsBehavior;
 import com.facebook.presto.metadata.InsertTableHandle;
 import com.facebook.presto.metadata.Metadata;
@@ -51,6 +52,7 @@ import com.facebook.presto.testing.QueryRunner;
 import com.facebook.presto.tests.AbstractTestIntegrationSmokeTest;
 import com.facebook.presto.tests.DistributedQueryRunner;
 import com.facebook.presto.tests.QueryAssertions;
+import com.facebook.presto.tests.ResultWithQueryId;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -5485,6 +5487,8 @@ public class TestHiveIntegrationSmokeTest
     {
         computeActual("CREATE TABLE test_customer_base WITH (partitioned_by = ARRAY['nationkey']) " +
                 "AS SELECT custkey, name, address, nationkey FROM customer LIMIT 10");
+        computeActual("CREATE TABLE test_customer_base_copy WITH (partitioned_by = ARRAY['nationkey']) " +
+                "AS SELECT custkey, name, address, nationkey FROM customer LIMIT 10");
         computeActual("CREATE TABLE test_orders_base WITH (partitioned_by = ARRAY['orderstatus']) " +
                 "AS SELECT orderkey, custkey, totalprice, orderstatus FROM orders LIMIT 10");
 
@@ -5510,7 +5514,7 @@ public class TestHiveIntegrationSmokeTest
         assertQueryFails(
                 "CREATE MATERIALIZED VIEW test_customer_view_no_direct_partition_mapped WITH (partitioned_by = ARRAY['nationkey']" + retentionDays(30) + ") " +
                         "AS SELECT name, CAST(nationkey AS BIGINT) AS nationkey FROM test_customer_base",
-                format(".*Materialized view %s.test_customer_view_no_direct_partition_mapped must have at least partition to base table partition mapping for all base tables.",
+                format(".*Materialized view %s.test_customer_view_no_direct_partition_mapped must have at least one partition column that exists in.*",
                         getSession().getSchema().get()));
 
         // Test nested
@@ -5525,7 +5529,7 @@ public class TestHiveIntegrationSmokeTest
                 "AS SELECT COUNT(DISTINCT name) AS num, nationkey FROM (SELECT name, nationkey FROM test_customer_base GROUP BY 1, 2) a GROUP BY nationkey");
         assertUpdate("CREATE MATERIALIZED VIEW test_customer_union_view WITH (partitioned_by = ARRAY['nationkey']" + retentionDays(30) + ") " +
                 "AS SELECT name, nationkey FROM ( SELECT name, nationkey FROM test_customer_base WHERE nationkey = 1 UNION ALL " +
-                "SELECT name, nationkey FROM test_customer_base WHERE nationkey = 2)");
+                "SELECT name, nationkey FROM test_customer_base_copy WHERE nationkey = 2)");
         assertUpdate("CREATE MATERIALIZED VIEW test_customer_order_join_view WITH (partitioned_by = ARRAY['orderstatus', 'nationkey']" + retentionDays(30) + ") " +
                 "AS SELECT orders.totalprice, orders.orderstatus, customer.nationkey FROM test_customer_base customer JOIN " +
                 "test_orders_base orders ON orders.custkey = customer.custkey");
@@ -5533,14 +5537,12 @@ public class TestHiveIntegrationSmokeTest
                 "CREATE MATERIALIZED VIEW test_customer_order_join_view_no_base_partition_mapped WITH (partitioned_by = ARRAY['custkey']" + retentionDays(30) + ") " +
                         "AS SELECT orders.totalprice, customer.nationkey, customer.custkey FROM test_customer_base customer JOIN " +
                         "test_orders_base orders ON orders.custkey = customer.custkey",
-                format(".*Materialized view %s.test_customer_order_join_view_no_base_partition_mapped must have at least partition to base table partition " +
-                        "mapping for all base tables.", getSession().getSchema().get()));
+                format(".*Materialized view %s.test_customer_order_join_view_no_base_partition_mapped must have at least one partition column that exists in.*", getSession().getSchema().get()));
         assertQueryFails(
                 "CREATE MATERIALIZED VIEW test_customer_order_join_view_no_base_partition_mapped WITH (partitioned_by = ARRAY['nation_order']" + retentionDays(30) + ") " +
                         "AS SELECT orders.totalprice, CONCAT(CAST(customer.nationkey AS VARCHAR), orders.orderstatus) AS nation_order " +
                         "FROM test_customer_base customer JOIN test_orders_base orders ON orders.custkey = customer.custkey",
-                format(".*Materialized view %s.test_customer_order_join_view_no_base_partition_mapped must have at least partition to base table partition " +
-                        "mapping for all base tables.", getSession().getSchema().get()));
+                format(".*Materialized view %s.test_customer_order_join_view_no_base_partition_mapped must have at least one partition column that exists in.*", getSession().getSchema().get()));
 
         // Clean up
         computeActual("DROP TABLE IF EXISTS test_customer_base");
@@ -5698,6 +5700,17 @@ public class TestHiveIntegrationSmokeTest
                 queryRunner,
                 "SELECT COUNT(*) FROM ( " + expectedInsertQuery + " )",
                 false, true);
+
+        ResultWithQueryId<MaterializedResult> resultWithQueryId = ((DistributedQueryRunner) queryRunner).executeWithQueryId(session, refreshSql);
+        QueryInfo queryInfo = ((DistributedQueryRunner) queryRunner).getQueryInfo(resultWithQueryId.getQueryId());
+        assertEquals(queryInfo.getExpandedQuery().get(),
+                "-- Expanded Query: REFRESH MATERIALIZED VIEW test_orders_view WHERE (ds = '2020-01-01')\n" +
+                        "INSERT INTO test_orders_view SELECT\n" +
+                        "  orderkey\n" +
+                        ", orderpriority\n" +
+                        ", ds\n" +
+                        "FROM\n" +
+                        "  orders_partitioned\n");
     }
 
     @Test

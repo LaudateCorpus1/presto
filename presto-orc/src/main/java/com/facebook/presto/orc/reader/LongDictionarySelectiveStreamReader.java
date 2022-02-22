@@ -15,11 +15,11 @@ package com.facebook.presto.orc.reader;
 
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.BlockLease;
+import com.facebook.presto.common.predicate.TupleDomainFilter;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.OrcLocalMemoryContext;
 import com.facebook.presto.orc.StreamDescriptor;
 import com.facebook.presto.orc.Stripe;
-import com.facebook.presto.orc.TupleDomainFilter;
 import com.facebook.presto.orc.reader.LongDictionaryProvider.DictionaryResult;
 import com.facebook.presto.orc.stream.BooleanInputStream;
 import com.facebook.presto.orc.stream.InputStreamSource;
@@ -33,7 +33,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Optional;
 
-import static com.facebook.presto.orc.array.Arrays.ensureCapacity;
+import static com.facebook.presto.common.array.Arrays.ensureCapacity;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DATA;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.IN_DICTIONARY;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.PRESENT;

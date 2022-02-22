@@ -93,6 +93,7 @@ public class FeaturesConfig
     private DataSize writerMinSize = new DataSize(32, DataSize.Unit.MEGABYTE);
     private boolean optimizedScaleWriterProducerBuffer;
     private boolean optimizeMetadataQueries;
+    private boolean optimizeMetadataQueriesIgnoreStats;
     private boolean optimizeHashGeneration = true;
     private boolean enableIntermediateAggregations;
     private boolean pushTableWriteThroughUnion = true;
@@ -126,6 +127,7 @@ public class FeaturesConfig
     private boolean joinSpillingEnabled = true;
     private boolean aggregationSpillEnabled = true;
     private boolean distinctAggregationSpillEnabled = true;
+    private boolean dedupBasedDistinctAggregationSpillEnabled;
     private boolean orderByAggregationSpillEnabled = true;
     private boolean windowSpillEnabled = true;
     private boolean orderBySpillEnabled = true;
@@ -207,6 +209,7 @@ public class FeaturesConfig
 
     private boolean queryOptimizationWithMaterializedViewEnabled;
     private AggregationIfToFilterRewriteStrategy aggregationIfToFilterRewriteStrategy = AggregationIfToFilterRewriteStrategy.DISABLED;
+    private boolean verboseRuntimeStatsEnabled;
 
     public enum PartitioningPrecisionStrategy
     {
@@ -287,6 +290,7 @@ public class FeaturesConfig
     {
         DISABLED,
         FILTER_WITH_IF, // Rewrites AGG(IF(condition, expr)) to AGG(IF(condition, expr)) FILTER (WHERE condition).
+        UNWRAP_IF_SAFE, // Rewrites AGG(IF(condition, expr)) to AGG(expr) FILTER (WHERE condition) if it is safe to do so.
         UNWRAP_IF // Rewrites AGG(IF(condition, expr)) to AGG(expr) FILTER (WHERE condition).
     }
 
@@ -749,10 +753,23 @@ public class FeaturesConfig
     }
 
     @Config("optimizer.optimize-metadata-queries")
-    @ConfigDescription("Enable optimization for metadata queries. Note if metadata entry has empty data, the result might be different (e.g. empty Hive partition)")
+    @ConfigDescription("Enable optimization for metadata queries if the resulting partitions are not empty according to the partition stats")
     public FeaturesConfig setOptimizeMetadataQueries(boolean optimizeMetadataQueries)
     {
         this.optimizeMetadataQueries = optimizeMetadataQueries;
+        return this;
+    }
+
+    public boolean isOptimizeMetadataQueriesIgnoreStats()
+    {
+        return optimizeMetadataQueriesIgnoreStats;
+    }
+
+    @Config("optimizer.optimize-metadata-queries-ignore-stats")
+    @ConfigDescription("Enable optimization for metadata queries. Note if metadata entry has empty data, the result might be different (e.g. empty Hive partition)")
+    public FeaturesConfig setOptimizeMetadataQueriesIgnoreStats(boolean optimizeMetadataQueriesIgnoreStats)
+    {
+        this.optimizeMetadataQueriesIgnoreStats = optimizeMetadataQueriesIgnoreStats;
         return this;
     }
 
@@ -938,6 +955,19 @@ public class FeaturesConfig
     public boolean isDistinctAggregationSpillEnabled()
     {
         return distinctAggregationSpillEnabled;
+    }
+
+    @Config("experimental.dedup-based-distinct-aggregation-spill-enabled")
+    @ConfigDescription("Dedup input data for Distinct Aggregates before spilling")
+    public FeaturesConfig setDedupBasedDistinctAggregationSpillEnabled(boolean dedupBasedDistinctAggregationSpillEnabled)
+    {
+        this.dedupBasedDistinctAggregationSpillEnabled = dedupBasedDistinctAggregationSpillEnabled;
+        return this;
+    }
+
+    public boolean isDedupBasedDistinctAggregationSpillEnabled()
+    {
+        return dedupBasedDistinctAggregationSpillEnabled;
     }
 
     @Config("experimental.order-by-aggregation-spill-enabled")
@@ -1829,6 +1859,19 @@ public class FeaturesConfig
     public FeaturesConfig setQueryOptimizationWithMaterializedViewEnabled(boolean value)
     {
         this.queryOptimizationWithMaterializedViewEnabled = value;
+        return this;
+    }
+
+    public boolean isVerboseRuntimeStatsEnabled()
+    {
+        return verboseRuntimeStatsEnabled;
+    }
+
+    @Config("verbose-runtime-stats-enabled")
+    @ConfigDescription("Enable logging all runtime stats.")
+    public FeaturesConfig setVerboseRuntimeStatsEnabled(boolean value)
+    {
+        this.verboseRuntimeStatsEnabled = value;
         return this;
     }
 

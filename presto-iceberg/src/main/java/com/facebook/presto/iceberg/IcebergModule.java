@@ -15,12 +15,9 @@ package com.facebook.presto.iceberg;
 
 import com.facebook.presto.cache.CacheConfig;
 import com.facebook.presto.cache.CacheFactory;
-import com.facebook.presto.cache.CacheManager;
 import com.facebook.presto.cache.CacheStats;
 import com.facebook.presto.cache.ForCachingFileSystem;
-import com.facebook.presto.cache.NoOpCacheManager;
 import com.facebook.presto.cache.filemerge.FileMergeCacheConfig;
-import com.facebook.presto.cache.filemerge.FileMergeCacheManager;
 import com.facebook.presto.hive.CacheStatsMBean;
 import com.facebook.presto.hive.DynamicConfigurationProvider;
 import com.facebook.presto.hive.FileFormatDataSourceStats;
@@ -45,11 +42,14 @@ import com.facebook.presto.hive.metastore.CachingHiveMetastore;
 import com.facebook.presto.hive.metastore.ExtendedHiveMetastore;
 import com.facebook.presto.hive.metastore.HivePartitionMutator;
 import com.facebook.presto.hive.metastore.MetastoreConfig;
+import com.facebook.presto.iceberg.optimizer.IcebergPlanOptimizer;
 import com.facebook.presto.orc.CachingStripeMetadataSource;
+import com.facebook.presto.orc.DwrfAwareStripeMetadataSourceFactory;
 import com.facebook.presto.orc.EncryptionLibrary;
 import com.facebook.presto.orc.OrcDataSourceId;
 import com.facebook.presto.orc.StorageStripeMetadataSource;
 import com.facebook.presto.orc.StripeMetadataSource;
+import com.facebook.presto.orc.StripeMetadataSourceFactory;
 import com.facebook.presto.orc.StripeReader;
 import com.facebook.presto.orc.UnsupportedEncryptionLibrary;
 import com.facebook.presto.orc.cache.CachingOrcFileTailSource;
@@ -57,6 +57,7 @@ import com.facebook.presto.orc.cache.OrcCacheConfig;
 import com.facebook.presto.orc.cache.OrcFileTailSource;
 import com.facebook.presto.orc.cache.StorageOrcFileTailSource;
 import com.facebook.presto.orc.metadata.OrcFileTail;
+import com.facebook.presto.orc.metadata.RowGroupIndex;
 import com.facebook.presto.spi.connector.ConnectorNodePartitioningProvider;
 import com.facebook.presto.spi.connector.ConnectorPageSinkProvider;
 import com.facebook.presto.spi.connector.ConnectorPageSourceProvider;
@@ -76,16 +77,16 @@ import org.weakref.jmx.testing.TestingMBeanServer;
 import javax.inject.Singleton;
 import javax.management.MBeanServer;
 
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 
 import static com.facebook.airlift.concurrent.Threads.daemonThreadsNamed;
 import static com.facebook.airlift.configuration.ConfigBinder.configBinder;
 import static com.facebook.airlift.json.JsonCodecBinder.jsonCodecBinder;
-import static com.facebook.presto.cache.CacheType.FILE_MERGE;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static java.lang.Math.toIntExact;
 import static java.util.concurrent.Executors.newFixedThreadPool;
-import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.weakref.jmx.ObjectNames.generatedNameOf;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
@@ -121,6 +122,8 @@ public class IcebergModule
 
         binder.bind(CacheFactory.class).in(Scopes.SINGLETON);
         binder.bind(IcebergTransactionManager.class).in(Scopes.SINGLETON);
+        binder.bind(IcebergCatalogName.class).toInstance(new IcebergCatalogName(connectorId));
+        binder.bind(IcebergResourceFactory.class).in(Scopes.SINGLETON);
 
         configBinder(binder).bindConfig(HiveClientConfig.class);
         configBinder(binder).bindConfig(IcebergConfig.class);
@@ -156,6 +159,8 @@ public class IcebergModule
 
         configBinder(binder).bindConfig(OrcCacheConfig.class, connectorId);
         configBinder(binder).bindConfig(OrcFileWriterConfig.class);
+
+        binder.bind(IcebergPlanOptimizer.class).in(Scopes.SINGLETON);
     }
 
     @ForCachingHiveMetastore
@@ -170,25 +175,11 @@ public class IcebergModule
 
     @Singleton
     @Provides
-    public CacheManager createCacheManager(CacheConfig cacheConfig, FileMergeCacheConfig fileMergeCacheConfig, CacheStats cacheStats)
-    {
-        if (cacheConfig.isCachingEnabled() && cacheConfig.getCacheType() == FILE_MERGE) {
-            return new FileMergeCacheManager(
-                    cacheConfig,
-                    fileMergeCacheConfig,
-                    cacheStats,
-                    newScheduledThreadPool(5, daemonThreadsNamed("iceberg-cache-flusher-%s")),
-                    newScheduledThreadPool(1, daemonThreadsNamed("iceberg-cache-remover-%s")),
-                    newScheduledThreadPool(1, daemonThreadsNamed("hive-cache-size-calculator-%s")));
-        }
-        return new NoOpCacheManager();
-    }
-
-    @Singleton
-    @Provides
     public OrcFileTailSource createOrcFileTailSource(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
     {
-        OrcFileTailSource orcFileTailSource = new StorageOrcFileTailSource();
+        int expectedFileTailSizeInBytes = toIntExact(orcCacheConfig.getExpectedFileTailSize().toBytes());
+        boolean dwrfStripeCacheEnabled = orcCacheConfig.isDwrfStripeCacheEnabled();
+        OrcFileTailSource orcFileTailSource = new StorageOrcFileTailSource(expectedFileTailSizeInBytes, dwrfStripeCacheEnabled);
         if (orcCacheConfig.isFileTailCacheEnabled()) {
             Cache<OrcDataSourceId, OrcFileTail> cache = CacheBuilder.newBuilder()
                     .maximumWeight(orcCacheConfig.getFileTailCacheSize().toBytes())
@@ -205,7 +196,7 @@ public class IcebergModule
 
     @Singleton
     @Provides
-    public StripeMetadataSource createStripeMetadataSource(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
+    public StripeMetadataSourceFactory createStripeMetadataSourceFactory(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
     {
         StripeMetadataSource stripeMetadataSource = new StorageStripeMetadataSource();
         if (orcCacheConfig.isStripeMetadataCacheEnabled()) {
@@ -223,10 +214,26 @@ public class IcebergModule
                     .build();
             CacheStatsMBean footerCacheStatsMBean = new CacheStatsMBean(footerCache);
             CacheStatsMBean streamCacheStatsMBean = new CacheStatsMBean(streamCache);
-            stripeMetadataSource = new CachingStripeMetadataSource(stripeMetadataSource, footerCache, streamCache);
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeFooter"), footerCacheStatsMBean);
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStream"), streamCacheStatsMBean);
+
+            Optional<Cache<StripeReader.StripeStreamId, List<RowGroupIndex>>> rowGroupIndexCache = Optional.empty();
+            if (orcCacheConfig.isRowGroupIndexCacheEnabled()) {
+                rowGroupIndexCache = Optional.of(CacheBuilder.newBuilder()
+                        .maximumWeight(orcCacheConfig.getRowGroupIndexCacheSize().toBytes())
+                        .weigher((id, rowGroupIndices) -> toIntExact(((List<RowGroupIndex>) rowGroupIndices).stream().mapToLong(RowGroupIndex::getRetainedSizeInBytes).sum()))
+                        .expireAfterAccess(orcCacheConfig.getStripeStreamCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
+                        .recordStats()
+                        .build());
+                CacheStatsMBean rowGroupIndexCacheStatsMBean = new CacheStatsMBean(rowGroupIndexCache.get());
+                exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStreamRowGroupIndex"), rowGroupIndexCacheStatsMBean);
+            }
+            stripeMetadataSource = new CachingStripeMetadataSource(stripeMetadataSource, footerCache, streamCache, rowGroupIndexCache);
         }
-        return stripeMetadataSource;
+        StripeMetadataSourceFactory factory = StripeMetadataSourceFactory.of(stripeMetadataSource);
+        if (orcCacheConfig.isDwrfStripeCacheEnabled()) {
+            factory = new DwrfAwareStripeMetadataSourceFactory(factory);
+        }
+        return factory;
     }
 }

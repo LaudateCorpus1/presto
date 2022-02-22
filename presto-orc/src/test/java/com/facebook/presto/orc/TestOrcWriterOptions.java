@@ -43,12 +43,12 @@ public class TestOrcWriterOptions
                     .build();
 
             if (value) {
-                DwrfStripeCacheOptions dwrfStripeCacheOptions = options.getDwrfWriterOptions().get();
+                DwrfStripeCacheOptions dwrfStripeCacheOptions = options.getDwrfStripeCacheOptions().get();
                 assertEquals(dwrfStripeCacheOptions.getStripeCacheMode(), DWRF_STRIPE_CACHE_MODE);
                 assertEquals(dwrfStripeCacheOptions.getStripeCacheMaxSize(), DWRF_STRIPE_CACHE_MAX_SIZE);
             }
             else {
-                assertEquals(Optional.empty(), options.getDwrfWriterOptions());
+                assertEquals(Optional.empty(), options.getDwrfStripeCacheOptions());
             }
         }
     }
@@ -61,12 +61,17 @@ public class TestOrcWriterOptions
         int stripeMaxRowCount = 1_100_000;
         int rowGroupMaxRowCount = 15_000;
         DataSize dictionaryMaxMemory = new DataSize(13_000, KILOBYTE);
+        DataSize dictionaryMemoryRange = new DataSize(1_000, KILOBYTE);
+        int dictionaryUsefulCheckPerChunkFrequency = 9_999;
+        DataSize dictionaryUsefulCheckIncrement = new DataSize(500, KILOBYTE);
+        DataSize dictionaryUsefulCheckColumnSize = new DataSize(1, MEGABYTE);
         DataSize stringMaxStatisticsLimit = new DataSize(128, BYTE);
         DataSize maxCompressionBufferSize = new DataSize(512, KILOBYTE);
         OptionalInt compressionLevel = OptionalInt.of(5);
         StreamLayout streamLayout = new StreamLayout.ByColumnSize();
         boolean integerDictionaryEncodingEnabled = true;
         boolean stringDictionarySortingEnabled = false;
+        int preserveDirectEncodingStripeCount = 10;
 
         OrcWriterOptions.Builder builder = OrcWriterOptions.builder()
                 .withStripeMinSize(stripeMinSize)
@@ -74,12 +79,16 @@ public class TestOrcWriterOptions
                 .withStripeMaxRowCount(stripeMaxRowCount)
                 .withRowGroupMaxRowCount(rowGroupMaxRowCount)
                 .withDictionaryMaxMemory(dictionaryMaxMemory)
+                .withDictionaryMemoryAlmostFullRange(dictionaryMemoryRange)
+                .withDictionaryUsefulCheckPerChunkFrequency(dictionaryUsefulCheckPerChunkFrequency)
+                .withDictionaryUsefulCheckColumnSize(dictionaryUsefulCheckColumnSize)
                 .withMaxStringStatisticsLimit(stringMaxStatisticsLimit)
                 .withMaxCompressionBufferSize(maxCompressionBufferSize)
                 .withCompressionLevel(compressionLevel)
                 .withStreamLayout(streamLayout)
                 .withIntegerDictionaryEncodingEnabled(integerDictionaryEncodingEnabled)
-                .withStringDictionarySortingEnabled(stringDictionarySortingEnabled);
+                .withStringDictionarySortingEnabled(stringDictionarySortingEnabled)
+                .withPreserveDirectEncodingStripeCount(preserveDirectEncodingStripeCount);
 
         OrcWriterOptions options = builder.build();
 
@@ -88,13 +97,17 @@ public class TestOrcWriterOptions
         assertEquals(stripeMaxRowCount, options.getStripeMaxRowCount());
         assertEquals(rowGroupMaxRowCount, options.getRowGroupMaxRowCount());
         assertEquals(dictionaryMaxMemory, options.getDictionaryMaxMemory());
+        assertEquals(dictionaryMemoryRange, options.getDictionaryMemoryAlmostFullRange());
+        assertEquals(dictionaryUsefulCheckPerChunkFrequency, options.getDictionaryUsefulCheckPerChunkFrequency());
+        assertEquals(dictionaryUsefulCheckColumnSize, options.getDictionaryUsefulCheckColumnSize());
         assertEquals(stringMaxStatisticsLimit, options.getMaxStringStatisticsLimit());
         assertEquals(maxCompressionBufferSize, options.getMaxCompressionBufferSize());
         assertEquals(compressionLevel, options.getCompressionLevel());
         assertEquals(streamLayout, options.getStreamLayout());
         assertEquals(integerDictionaryEncodingEnabled, options.isIntegerDictionaryEncodingEnabled());
         assertEquals(stringDictionarySortingEnabled, options.isStringDictionarySortingEnabled());
-        assertEquals(Optional.empty(), options.getDwrfWriterOptions());
+        assertEquals(Optional.empty(), options.getDwrfStripeCacheOptions());
+        assertEquals(preserveDirectEncodingStripeCount, options.getPreserveDirectEncodingStripeCount());
     }
 
     @Test
@@ -105,6 +118,9 @@ public class TestOrcWriterOptions
         int stripeMaxRowCount = 1_100_000;
         int rowGroupMaxRowCount = 15_000;
         DataSize dictionaryMaxMemory = new DataSize(13_000, KILOBYTE);
+        DataSize dictionaryMemoryRange = new DataSize(1_000, KILOBYTE);
+        int dictionaryUsefulCheckPerChunkFrequency = 9_999;
+        DataSize dictionaryUsefulCheckColumnSize = new DataSize(1, MEGABYTE);
         DataSize stringMaxStatisticsLimit = new DataSize(128, BYTE);
         DataSize maxCompressionBufferSize = new DataSize(512, KILOBYTE);
         DataSize dwrfStripeCacheMaxSize = new DataSize(4, MEGABYTE);
@@ -113,6 +129,7 @@ public class TestOrcWriterOptions
         StreamLayout streamLayout = new StreamLayout.ByColumnSize();
         boolean integerDictionaryEncodingEnabled = false;
         boolean stringDictionarySortingEnabled = true;
+        int preserveDirectEncodingStripeCount = 0;
 
         OrcWriterOptions writerOptions = OrcWriterOptions.builder()
                 .withStripeMinSize(stripeMinSize)
@@ -120,6 +137,9 @@ public class TestOrcWriterOptions
                 .withStripeMaxRowCount(stripeMaxRowCount)
                 .withRowGroupMaxRowCount(rowGroupMaxRowCount)
                 .withDictionaryMaxMemory(dictionaryMaxMemory)
+                .withDictionaryMemoryAlmostFullRange(dictionaryMemoryRange)
+                .withDictionaryUsefulCheckPerChunkFrequency(dictionaryUsefulCheckPerChunkFrequency)
+                .withDictionaryUsefulCheckColumnSize(dictionaryUsefulCheckColumnSize)
                 .withMaxStringStatisticsLimit(stringMaxStatisticsLimit)
                 .withMaxCompressionBufferSize(maxCompressionBufferSize)
                 .withCompressionLevel(compressionLevel)
@@ -129,13 +149,15 @@ public class TestOrcWriterOptions
                 .withDwrfStripeCacheEnabled(true)
                 .withDwrfStripeCacheMaxSize(dwrfStripeCacheMaxSize)
                 .withDwrfStripeCacheMode(dwrfStripeCacheMode)
+                .withPreserveDirectEncodingStripeCount(preserveDirectEncodingStripeCount)
                 .build();
 
-        String expectedString = "OrcWriterOptions{stripeMinSize=13MB, stripeMaxSize=27MB, stripeMaxRowCount=1100000, "
-                + "rowGroupMaxRowCount=15000, dictionaryMaxMemory=13000kB, maxStringStatisticsLimit=128B, "
-                + "maxCompressionBufferSize=512kB, compressionLevel=OptionalInt[5], streamLayout=ByColumnSize{}, "
-                + "integerDictionaryEncodingEnabled=false, stringDictionarySortingEnabled=true, "
-                + "dwrfWriterOptions=Optional[DwrfStripeCacheOptions{stripeCacheMode=INDEX_AND_FOOTER, stripeCacheMaxSize=4MB}]}";
+        String expectedString = "OrcWriterOptions{stripeMinSize=13MB, stripeMaxSize=27MB, stripeMaxRowCount=1100000, rowGroupMaxRowCount=15000, " +
+                "dictionaryMaxMemory=13000kB, dictionaryMemoryAlmostFullRange=1000kB, dictionaryUsefulCheckPerChunkFrequency=9999, " +
+                "dictionaryUsefulCheckColumnSize=1MB, maxStringStatisticsLimit=128B, maxCompressionBufferSize=512kB, " +
+                "compressionLevel=OptionalInt[5], streamLayout=ByColumnSize{}, integerDictionaryEncodingEnabled=false, " +
+                "stringDictionarySortingEnabled=true, dwrfWriterOptions=Optional[DwrfStripeCacheOptions{stripeCacheMode=INDEX_AND_FOOTER, stripeCacheMaxSize=4MB}], " +
+                "ignoreDictionaryRowGroupSizes=false, preserveDirectEncodingStripeCount=0}";
         assertEquals(expectedString, writerOptions.toString());
     }
 }
