@@ -150,7 +150,7 @@ public class RetryDriver
                     addSuppressed(e, suppressedExceptions);
                     throw e;
                 }
-                log.debug("Failed on executing %s with attempt %d, will retry. Exception: %s", callableName, attempt, e.getMessage());
+                log.error("Failed on executing %s with attempt %d, will retry. Exception: %s", callableName, attempt, e.getMessage());
 
                 suppressedExceptions.add(e);
 

@@ -14,6 +14,7 @@
 
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.presto.cost.CostComparator;
 import com.facebook.presto.cost.LocalCostEstimate;
 import com.facebook.presto.cost.PlanNodeStatsEstimate;
@@ -44,6 +45,7 @@ import static java.util.Objects.requireNonNull;
 public class DetermineJoinDistributionType
         implements Rule<JoinNode>
 {
+    private static final Logger log = Logger.get(DetermineJoinDistributionType.class);
     private static final Pattern<JoinNode> PATTERN = join().matching(joinNode -> !joinNode.getDistributionType().isPresent());
 
     private final CostComparator costComparator;
@@ -88,7 +90,7 @@ public class DetermineJoinDistributionType
         addJoinsWithDifferentDistributions(joinNode, possibleJoinNodes, context);
         addJoinsWithDifferentDistributions(joinNode.flipChildren(), possibleJoinNodes, context);
 
-        if (possibleJoinNodes.stream().anyMatch(result -> result.getCost().hasUnknownComponents()) || possibleJoinNodes.isEmpty()) {
+        if (possibleJoinNodes.isEmpty()) {
             return getSyntacticOrderJoin(joinNode, context, AUTOMATIC);
         }
 
@@ -100,10 +102,11 @@ public class DetermineJoinDistributionType
     private void addJoinsWithDifferentDistributions(JoinNode joinNode, List<PlanNodeWithCost> possibleJoinNodes, Context context)
     {
         if (!mustPartition(joinNode) && isBelowMaxBroadcastSize(joinNode, context)) {
+            log.info("Join is eligible for Broadcast " + joinNode.getLeft() + " right " + joinNode.getRight());
             possibleJoinNodes.add(getJoinNodeWithCost(context, joinNode.withDistributionType(REPLICATED)));
         }
-        // don't consider partitioned inequality joins because they execute on a single node.
         if (!mustReplicate(joinNode, context) && !joinNode.getCriteria().isEmpty()) {
+            log.info("Join is eligible for Hash Join" + joinNode.getLeft() + " right " + joinNode.getRight());
             possibleJoinNodes.add(getJoinNodeWithCost(context, joinNode.withDistributionType(PARTITIONED)));
         }
     }

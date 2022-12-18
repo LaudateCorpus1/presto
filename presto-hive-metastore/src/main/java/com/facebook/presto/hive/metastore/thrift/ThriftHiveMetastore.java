@@ -41,6 +41,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import io.airlift.units.Duration;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.api.AlreadyExistsException;
 import org.apache.hadoop.hive.metastore.api.ColumnStatisticsObj;
@@ -104,6 +105,8 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Sets.difference;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.toSet;
 import static org.apache.hadoop.hive.common.FileUtils.makePartName;
@@ -118,6 +121,10 @@ public class ThriftHiveMetastore
     private final ThriftHiveMetastoreStats stats;
     private final HiveCluster clientProvider;
     private final Function<Exception, Exception> exceptionMapper;
+    private static final Duration BACKOFF_MIN_SLEEP = new Duration(10, SECONDS);
+    private int maxAttempts = 10;
+    private Duration maxBackoffTime = new Duration(10, MINUTES);
+    private Duration maxRetryTime = new Duration(10, MINUTES);
     private final boolean impersonationEnabled;
 
     @Inject
@@ -1306,6 +1313,8 @@ public class ThriftHiveMetastore
     private RetryDriver retry()
     {
         return RetryDriver.retry()
+                .maxAttempts(maxAttempts)
+                .exponentialBackoff(BACKOFF_MIN_SLEEP, maxBackoffTime, maxRetryTime, 2.0)
                 .exceptionMapper(exceptionMapper)
                 .stopOn(PrestoException.class);
     }

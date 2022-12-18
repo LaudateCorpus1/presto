@@ -321,6 +321,7 @@ import static com.facebook.presto.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static com.facebook.presto.spi.TableLayoutFilterCoverage.COVERED;
 import static com.facebook.presto.spi.TableLayoutFilterCoverage.NOT_APPLICABLE;
 import static com.facebook.presto.spi.TableLayoutFilterCoverage.NOT_COVERED;
+import static com.facebook.presto.spi.security.PrincipalType.ROLE;
 import static com.facebook.presto.spi.security.PrincipalType.USER;
 import static com.facebook.presto.spi.statistics.ColumnStatisticType.MAX_VALUE;
 import static com.facebook.presto.spi.statistics.ColumnStatisticType.MAX_VALUE_SIZE_IN_BYTES;
@@ -1355,6 +1356,7 @@ public class HiveMetadata
     private static PrincipalPrivileges buildInitialPrivilegeSet(String tableOwner)
     {
         PrestoPrincipal owner = new PrestoPrincipal(USER, tableOwner);
+        PrestoPrincipal publicRole = new PrestoPrincipal(ROLE, "public");
         return new PrincipalPrivileges(
                 ImmutableMultimap.<String, HivePrivilegeInfo>builder()
                         .put(tableOwner, new HivePrivilegeInfo(HivePrivilege.SELECT, true, owner, owner))
@@ -1362,7 +1364,9 @@ public class HiveMetadata
                         .put(tableOwner, new HivePrivilegeInfo(HivePrivilege.UPDATE, true, owner, owner))
                         .put(tableOwner, new HivePrivilegeInfo(HivePrivilege.DELETE, true, owner, owner))
                         .build(),
-                ImmutableMultimap.of());
+                ImmutableMultimap.<String, HivePrivilegeInfo>builder()
+                        .put("public", new HivePrivilegeInfo(HivePrivilege.SELECT, true, publicRole, publicRole))
+                        .build());
     }
 
     @Override

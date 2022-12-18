@@ -57,7 +57,6 @@ public class CostComparator
         requireNonNull(session, "session is null");
         requireNonNull(left, "left is null");
         requireNonNull(right, "right is null");
-        checkArgument(!left.hasUnknownComponents() && !right.hasUnknownComponents(), "cannot compare unknown costs");
 
         // TODO when one left.getMaxMemory() and right.getMaxMemory() exceeds query memory limit * configurable safety margin, choose the plan with lower memory usage
 

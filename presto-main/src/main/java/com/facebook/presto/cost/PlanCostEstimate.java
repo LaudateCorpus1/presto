@@ -119,7 +119,8 @@ public final class PlanCostEstimate
      */
     public boolean hasUnknownComponents()
     {
-        return isNaN(cpuCost) || isNaN(maxMemory) || isNaN(maxMemoryWhenOutputting) || isNaN(networkCost);
+        //return isNaN(cpuCost) || isNaN(maxMemory) || isNaN(maxMemoryWhenOutputting) || isNaN(networkCost);
+        return isNaN(cpuCost) && isNaN(maxMemory) && isNaN(maxMemoryWhenOutputting) && isNaN(networkCost);
     }
 
     @Override

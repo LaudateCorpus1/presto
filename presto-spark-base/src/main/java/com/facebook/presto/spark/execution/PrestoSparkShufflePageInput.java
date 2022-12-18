@@ -30,6 +30,7 @@ import scala.collection.Iterator;
 
 import javax.annotation.concurrent.GuardedBy;
 
+import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.util.List;
 
@@ -90,7 +91,7 @@ public class PrestoSparkShufflePageInput
                         short entryRowCount = getShortLittleEndian(buffer);
                         rowCount += entryRowCount;
                         currentIteratorProcessedRows += entryRowCount;
-                        buffer.position(buffer.position() + 2);
+                        ((Buffer) buffer).position(buffer.position() + 2);
                         output.writeBytes(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining());
                     }
                     else if (row.getArray() != null) {
